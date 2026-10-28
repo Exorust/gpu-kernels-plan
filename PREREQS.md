@@ -14,8 +14,9 @@ graph TD
   roof["Roofline + H100 numbers (W1)"]:::w1
   red["Reduction (W1)"]:::w1
   smx["Online softmax (W1)"]:::w1
-  ncu["Nsight Compute + SASS (W1)"]:::w1
-  simple["vLLM norm / activation / cache / topk_softmax (W1)"]:::w1
+  ncu["Nsight Compute (W1)"]:::w1
+  simple["vLLM RMSNorm (W1)"]:::w1
+  topk["vLLM topk_softmax (W2)"]:::w2
 
   tile["siboehm GEMM tiling (W2)"]:::w2
   tri["Triton GEMM (W2)"]:::w2
@@ -48,11 +49,12 @@ graph TD
   roof --> red & smx & tile
   ncu --> tile
   red --> simple
-  smx --> simple & fa
+  smx --> topk & fa
   tile --> tri & mma
   mma --> marlin & hop
   tri --> fmoe & fabuild & vattn & sattn
-  simple --> fmoe
+  red --> topk
+  topk --> fmoe
   hop --> sk & dg & bw & cute
   lp --> dg & cutedsl
   dg --> sgemm & gm_fp8

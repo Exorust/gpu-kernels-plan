@@ -14,15 +14,18 @@ GPU work runs on Modal H100. GPU MODE problems run on GPU MODE's machines throug
 
 You know the architecture. This week turns it into numbers you can predict before you profile.
 
-**Deliverable.** Reduction and online softmax kernels at 80% or more of peak memory bandwidth, each with a prediction written before the profile. Start a table of production kernels (kernel, what it computes, bound type, the one trick that makes it fast); every week adds rows.
+One small thing per day. Nothing here needs more than one sitting.
+
+**Deliverable.** A reduction kernel at 70% or more of peak memory bandwidth, a correct online softmax, and one line per kernel: what you predicted, what you measured. Start a table of production kernels (kernel, what it computes, bound type, the one trick that makes it fast); every week adds rows.
 
 | Day | Session |
 |---|---|
-| Mon | Write H100 numbers from memory (SMs, shared memory per SM, L2, HBM bandwidth, BF16 TFLOPS, roofline ridge point). Check them against the [Modal GPU Glossary](https://modal.com/gpu-glossary). Fix the wrong ones. |
-| Tue | *build* · Reduction ([Harris](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf), versions 1-7). Predict bandwidth for each version, then measure. |
-| Wed | *build* · Fused online softmax ([paper](https://arxiv.org/abs/1805.02867)). Week 4 FlashAttention depends on this. |
-| Thu | *profile* · [Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/) on both kernels: memory workload, warp stall reasons, roofline. Dump the SASS (machine code) of your softmax with `cuobjdump -sass`. |
-| Fri | *production* · vLLM [`layernorm_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu), [`activation_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/activation_kernels.cu), [`cache_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/cache_kernels.cu), [`moe/topk_softmax_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/moe/topk_softmax_kernels.cu). Find your reduction and softmax inside them. Map from [Anatomy of vLLM](https://vllm.ai/blog/2025-09-05-anatomy-of-vllm). |
+| Mon | Write five H100 numbers from memory: HBM bandwidth, BF16 TFLOPS, shared memory per SM, L2 size, SM count. Check them in the [Modal GPU Glossary](https://modal.com/gpu-glossary). Compute one more: the roofline ridge point (FLOPs per byte where a kernel stops being memory-bound). |
+| Tue | *build* · Reduction, versions 1-3 only from [Harris](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (naive, no divergence, no bank conflicts). Measure bandwidth for each. Skim the slides for versions 4-7; build them only if you have time left. |
+| Wed | *paper* · Online softmax ([paper](https://arxiv.org/abs/1805.02867), sections 1-3). Derive the rescale step on paper: why a running max and a running sum are enough for one pass. No code today. Week 4 FlashAttention uses this exact step. |
+| Thu | *build* · Online softmax, one row per block. Triton is fine (start from the [fused softmax tutorial](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html) and change it to one pass). Check against `torch.softmax`. |
+| Fri | *profile + production* · [Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/) on your reduction. Read three numbers only: DRAM throughput, achieved occupancy, top warp stall reason. Then open vLLM [`layernorm_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu) and find the reduction inside RMSNorm. |
+| Buffer | Reduction versions 4-7 if skipped. Dump SASS (machine code) of your reduction with `cuobjdump -sass` and find the shared-memory loads. |
 
 ## Week 2: GEMM on CUDA cores and Ampere tensor cores
 
@@ -34,7 +37,8 @@ You know the architecture. This week turns it into numbers you can predict befor
 | Tue | *build* · Same GEMM in [Triton](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html). Note grouped tile ordering for L2 reuse. Week 4 attention and every Triton production kernel depend on this. |
 | Wed | *read* · Ampere tensor cores: `mma.sync`, `ldmatrix`, `cp.async`, shared-memory swizzling. [Fast matmul from scratch with tensor cores](https://alexarmbr.github.io/2024/08/10/How-To-Write-A-Fast-Matrix-Multiplication-From-Scratch-With-Tensor-Cores.html) (Armbruster). |
 | Thu | *build* · Convert your Monday kernel to `mma.sync`. Profile tensor pipe utilization. |
-| Fri | *production* · [Marlin](https://github.com/IST-DASLab/marlin) (INT4 weights on `mma.sync`, a quantized GEMM) and vLLM's Triton [`fused_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py) (grouped GEMM for MoE, fed by Week 1's topk_softmax). |
+| Fri | *production* · [Marlin](https://github.com/IST-DASLab/marlin) (INT4 weights on `mma.sync`, a quantized GEMM). Then vLLM MoE: [`moe/topk_softmax_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/moe/topk_softmax_kernels.cu) (picks experts, uses your Week 1 softmax) feeding the Triton [`fused_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py) (grouped GEMM). |
+| Buffer | vLLM [`activation_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/activation_kernels.cu): a simple memory-bound kernel to add to your table. |
 
 ## Week 3: GEMM on Hopper and Blackwell
 
@@ -59,7 +63,7 @@ The densest week. Use both buffer days if needed.
 |---|---|
 | Mon | *read* · [FlashAttention-2](https://arxiv.org/abs/2307.08691) and [Flash-Decoding](https://crfm.stanford.edu/2023/10/12/flashdecoding.html). Derive the tiled forward pass from your Week 1 softmax. Skim [FA-3](https://arxiv.org/abs/2407.08608) for what Week 3's Hopper features change. |
 | Tue | *build* · Triton FlashAttention forward. Use the official tutorial only after yours runs. |
-| Wed | *production* · Paged attention: [`paged_attention.md`](https://github.com/vllm-project/vllm/blob/main/docs/design/paged_attention.md) for the algorithm (the CUDA kernel is gone from `csrc/`), then vLLM [`triton_unified_attention.py`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/ops/triton_unified_attention.py). |
+| Wed | *production* · Paged attention: [`paged_attention.md`](https://github.com/vllm-project/vllm/blob/main/docs/design/paged_attention.md) for the algorithm (the CUDA kernel is gone from `csrc/`), [`cache_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/cache_kernels.cu) (`reshape_and_cache` writes K and V into paged blocks), then vLLM [`triton_unified_attention.py`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/ops/triton_unified_attention.py). |
 | Thu | *production* · SGLang [`extend_attention.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/kernels/ops/attention/extend_attention.py) (prefill on a cached prefix) and [`decode_attention.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/kernels/ops/attention/decode_attention.py) (split-KV decode). |
 | Fri | *production* · [FlashInfer paper](https://arxiv.org/abs/2501.01005), then [`include/flashinfer/attention/`](https://github.com/flashinfer-ai/flashinfer/tree/main/include/flashinfer/attention) `decode.cuh`, `prefill.cuh`, `scheduler.cuh`. Run the benchmark on Modal. |
 
