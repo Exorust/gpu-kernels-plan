@@ -20,7 +20,7 @@ One small thing per day. Nothing here needs more than one sitting.
 
 | Day | Session |
 |---|---|
-| Mon | Write five H100 numbers from memory: HBM bandwidth, BF16 TFLOPS, shared memory per SM, L2 size, SM count. Check them in the [Modal GPU Glossary](https://modal.com/gpu-glossary). Compute one more: the roofline ridge point (FLOPs per byte where a kernel stops being memory-bound). |
+| Mon | Look up five H100 numbers and write one line on what each one limits: HBM bandwidth, BF16 TFLOPS, shared memory per SM, L2 size, SM count. Source: [Modal GPU Glossary](https://modal.com/gpu-glossary). Compute one more: the roofline ridge point (FLOPs per byte where a kernel stops being memory-bound). |
 | Tue | *build* · Reduction, versions 1-3 only from [Harris](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (naive, no divergence, no bank conflicts). Measure bandwidth for each. Skim the slides for versions 4-7; build them only if you have time left. |
 | Wed | *paper* · Online softmax ([paper](https://arxiv.org/abs/1805.02867), sections 1-3). Derive the rescale step on paper: why a running max and a running sum are enough for one pass. No code today. Week 4 FlashAttention uses this exact step. |
 | Thu | *build* · Online softmax, one row per block. Triton is fine (start from the [fused softmax tutorial](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html) and change it to one pass). Check against `torch.softmax`. |
