@@ -15,7 +15,16 @@
         "Turning a hardware number into a lower bound on a specific kernel time is not yet practiced.",
         "The ridge point differs between CUDA cores and tensor cores, and that split is not yet in the notes."
       ],
-      "notePath": "artifacts/w1-mon-h100-numbers.md"
+      "notePath": "artifacts/w1-mon-h100-numbers.md",
+      "citations": {
+        "ok": false,
+        "failures": [
+          "\"(before the first heading)\": no source line"
+        ],
+        "unverified": 1,
+        "confirmed": false,
+        "attempts": 1
+      }
     },
     {
       "status": "todo",
