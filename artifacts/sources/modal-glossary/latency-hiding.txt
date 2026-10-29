@@ -1,0 +1,27 @@
+What is latency hiding? | GPU Glossary
+Source URL: https://modal.com/gpu-glossary/ (snapshot 2026-10-28)
+
+What is latency hiding?
+Latency hiding is a strategy to mask long-latency operations by running many of them concurrently .
+Performant GPU programs hide latency by interleaving the execution of many threads .
+This allows programs to maintain high throughput despite long instruction latencies.
+When one warp stalls on a slow memory operation, the GPU immediately switches to execute
+instructions from another eligible warp .
+This keeps all execution units busy concurrently.
+While one warp uses Tensor Cores for matrix multiplication, another might execute arithmetic on CUDA
+Cores (say, quantizing or dequantizing matrix multiplicands ), and a third could be fetching data
+through the load/store units .
+Concretely, consider the following simple instruction sequence in Streaming Assembler . nasm
+LDG.E.SYS R1, [R0] // memory load, 400 cycles IMUL R2, R1, 0xBEEF // integer multiply, 6 cycles IADD
+R4, R2, 0xAFFE // integer add, 4 cycles IMUL R6, R4, 0x1337 // integer multiply, 6 cycles Executed
+sequentially, this would take 416 cycles to complete.
+We can hide this latency by operating concurrently.
+If we assume we can issue one instruction every cycle, then, by Little's Law , if we run 416
+concurrent threads , we can still finish the sequence once per cycle (on average), hiding the
+latency of memory from consumers of the data in R6 .
+Note that threads are not the unit of instruction issuance, warps are.
+Each warp contains 32 threads , and so our fragment requires 416 ÷ 32 = 13 warps .
+When successfully hiding latency, the GPU's scheduling system maintains this many warps in flight,
+switching between them whenever one stalls, ensuring the execution units never idle while waiting
+for slow operations to complete.
+For a deep dive into latency hiding on pre- Tensor Core GPUs, see Vasily Volkov's PhD thesis .

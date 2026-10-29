@@ -1,0 +1,36 @@
+What is occupancy? | GPU Glossary
+Source URL: https://modal.com/gpu-glossary/ (snapshot 2026-10-28)
+
+What is occupancy?
+Occupancy is the ratio of the active warps to the maximum number of active warps on a device.
+There are two types of occupancy measurements: Theoretical Occupancy represents the upper limit for
+occupancy due to the kernel launch configuration and device capabilities.
+Achieved Occupancy measures the actual occupancy during kernel execution, aka on active cycles .
+As part of the CUDA programming model , all the threads in a thread block are scheduled onto the
+same Streaming Multiprocessor (SM) .
+Each SM has resources (like space in shared memory ) that must be partitioned across thread blocks
+and so limit the number of thread blocks that can be scheduled on the SM .
+Let's work through an example.
+Consider an NVIDIA H100 GPU, which has these specifications: Maximum warps/SM: 64 Maximum blocks/SM:
+32 (32 bit) Registers: 65536 Shared memory (smem): 228 KB For a kernel using 32 threads per thread
+block , 8 registers per thread , and 12 KB shared memory per thread block , we end up limited by
+shared memory : 64 > 1 = warps/block = 32 threads/block ÷ 32 threads/warp 32 < 256 =
+blocks/register-file = 65,536 registers/register-file ÷ (32 threads/block × 8 registers/thread) 32 =
+blocks/SM 19 = blocks/smem = 228 KB/smem ÷ 12 KB/block Even though our register file is big enough
+to support 256 thread blocks concurrently, our shared memory is not, and so we can only run 19
+thread blocks per SM , corresponding to 19 warps .
+This is the common case where the size of program intermediates stored in registers is much smaller
+than elements of the program's working set that need to stay in shared memory .
+Low occupancy can hurt performance when there aren't enough eligible warps to hide the latency of
+instructions, which shows up as low instruction issue efficiency and under-utilized pipes .
+However, once occupancy is sufficient for latency hiding , increasing it further may actually
+degrade performance.
+Higher occupancy reduces resources per thread , potentially bottlenecking the kernel on registers or
+reducing the arithmetic intensity that modern GPU architectures are designed to exploit.
+More generally, occupancy measures what fraction of its maximum parallel tasks the GPU is handling
+simultaneously, which is not inherently a target of optimization in most kernels.
+Instead, we want to maximize the utilization of compute resources if we are compute-bound or memory
+resources if we are memory-bound .
+In particular, high-performance GEMM kernels on Hopper and Blackwell architecture GPUs often run at
+single-digit occupancy percentages because they don't need many warps to fully saturate the Tensor
+Cores .

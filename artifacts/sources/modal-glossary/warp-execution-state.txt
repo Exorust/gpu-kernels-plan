@@ -1,0 +1,45 @@
+What is warp execution state? | GPU Glossary
+Source URL: https://modal.com/gpu-glossary/ (snapshot 2026-10-28)
+
+What is warp execution state?
+The state of the warps running a kernel is described with a number of non-exclusive adjectives:
+active, stalled, eligible, and selected.
+A warp is considered active from the time its threads begin executing to the time when all threads
+in the warp have exited from the kernel .
+Active warps form the pool from which warp schedulers select candidates for instruction issue each
+cycle (i.e. to be put in one of the issue slots).
+The maximum number of active warps per Streaming Multiprocessor (SM) varies by architecture and is
+listed in NVIDIA's documentation for Compute Capability .
+For instance, on an H100 SXM GPU with Compute Capability 9.0, there can be up to 64 active warps per
+SM (2048 threads).
+Note that active warps are not necessarily executing instructions.
+There are active warps in all but one slot+cycle in the diagram above — a high occupancy .
+An eligible warp is an active warp that is ready to issue its next instruction.
+For a warp to be eligible, the following must be true: the next instruction has been fetched, the
+required execution unit is available, all instruction dependencies have been resolved, and no
+synchronization barriers block execution.
+Eligible warps represent the immediate candidates for instruction issue by the warp scheduler .
+Eligible warps appear on all cycles but cycle n + 2 in the diagram above.
+Having no eligible warps on many cycles can be bad for performance, especially if you are primarily
+using lower latency arithmetic units like CUDA Cores .
+A stalled warp is an active warp that cannot issue its next instruction due to unresolved
+dependencies or resource conflicts.
+Warps become stalled for various reasons including: execution dependencies, i.e. they must wait for
+results from previous arithmetic instructions, memory dependencies, i.e. they must wait for results
+from previous memory operations, pipeline conflicts, i.e. the execution resources are currently
+occupied.
+When warps are stalled on accesses to shared memory or on long-running arithmetic instructions, they
+are said to be stalled on the "short scoreboard".
+When warps are stalled on accesses to GPU RAM, they are said to be stalled on the "long scoreboard".
+Both types of stalls are known as scoreboard stalls .
+Stalled warps appear in multiple slots in each cycle in the diagram above.
+Stalled warps are not inherently bad — a large collection of concurrently stalled warps might be
+necessary to hide latency from long-running instructions, like memory loads or Tensor Core
+instructions like HMMA , which can run for dozens of cycles .
+A selected warp is an eligible warp chosen by the warp scheduler to receive an instruction during
+the current cycle.
+Each cycle, warp schedulers look at their pool of eligible warps , select one if there are any, and
+issue it an instruction.
+There is a selected warp on each cycle with an eligible warp .
+The fraction of active cycles on which a warp is selected and an instruction is issued is the issue
+efficiency .

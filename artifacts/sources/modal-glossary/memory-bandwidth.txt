@@ -1,0 +1,25 @@
+What is memory bandwidth? | GPU Glossary
+Source URL: https://modal.com/gpu-glossary/ (snapshot 2026-10-28)
+
+What is memory bandwidth?
+Memory bandwidth is the maximum rate at which data can be transferred between different levels of
+the memory hierarchy .
+It represents the theoretical maximum achievable throughput for moving data in bytes per second.
+It determines the slope of the "memory roof" in a roofline model of the hardware.
+There are many memory bandwidths in a complete system — one between each level of the memory
+hierarchy .
+The most important bandwidth is that between the GPU RAM and the register files of the Streaming
+Multiprocessors (SMs) , because the working sets of most kernels only fit in GPU RAM , not anywhere
+higher up in the memory hierarchy .
+It is for this reason that that bandwidth is the primary one used in roofline modeling of GPU kernel
+performance.
+Contemporary GPUs have memory bandwidths measured in terabytes per second.
+For example, B200 GPUs have a (bidirectional) memory bandwidth of 8 TB/sec to their HBM3e memory.
+This is much lower than the arithmetic bandwidth of the Tensor Cores in these GPUs, leading to
+increased ridge point arithmetic intensity .
+Representative bandwidth numbers for NVIDIA data center GPUs between the Ampere and Blackwell
+Streaming Multiprocessor architectures are listed in the table below.
+System (Compute / Memory) Arithmetic Bandwidth (TFLOPs/s) Memory Bandwidth (TB/s) Ridge Point
+(FLOPs/byte) A100 80GB SXM BF16 TC / HBM2e 312 2 156 H100 SXM BF16 TC / HBM3 989 3.35 295 B200 BF16
+TC / HBM3e 2250 8 281 H100 SXM FP8 TC / HBM3 1979 3.35 592 B200 FP8 TC / HBM3e 4500 8 562 B200 FP4
+TC / HBM3e 9000 8 1125

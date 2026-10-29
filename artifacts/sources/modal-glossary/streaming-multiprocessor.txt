@@ -1,0 +1,42 @@
+What is a Streaming Multiprocessor? | GPU Glossary
+Source URL: https://modal.com/gpu-glossary/ (snapshot 2026-10-28)
+
+What is a Streaming Multiprocessor?
+SM When we program GPUs , we produce sequences of instructions for its Streaming Multiprocessors to
+carry out.
+Streaming Multiprocessors (SMs) of NVIDIA GPUs are roughly analogous to the cores of CPUs.
+That is, SMs both execute computations and store state available for computation in registers, with
+associated caches.
+Compared to CPU cores, GPU SMs are simple, weak processors.
+Execution in SMs is pipelined within an instruction (as in almost all CPUs since the 1990s) but
+there is no speculative execution or instruction pointer prediction (unlike all contemporary high-
+performance CPUs).
+However, GPU SMs can execute more threads in parallel.
+For comparison: an AMD EPYC 9965 CPU draws at most 500 W and has 192 cores, each of which can
+execute instructions for at most two threads at a time, for a total of 384 threads in parallel,
+running at about 1.25 W per thread.
+An H100 SXM GPU draws at most 700 W and has 132 SMs, each of which has four Warp Schedulers that can
+each issue instructions to 32 threads (aka a warp ) in parallel per clock cycle, for a total of 128
+× 132 > 16,000 parallel threads running at about 5 cW apiece.
+Note that this is truly parallel: each of the 16,000 threads can make progress with each clock
+cycle.
+GPU SMs also support a large number of concurrent threads -- threads of execution whose instructions
+are interleaved.
+A single SM on an H100 can concurrently execute up to 2048 threads split across 64 thread groups of
+32 threads each.
+With 132 SMs, that's a total of over 250,000 concurrent threads.
+CPUs can also run many threads concurrently.
+But switches between warps happen at the speed of a single clock cycle (over 1000x faster than
+context switches on a CPU), again powered by the SM's Warp Schedulers .
+The volume of available warps and the speed of warp switches help hide latency caused by memory
+reads, thread synchronization, or other expensive instructions, ensuring that the arithmetic
+bandwidth provided by the CUDA Cores and Tensor Cores is well utilized.
+This latency-hiding is the secret to GPUs' strengths.
+CPUs seek to hide latency from end-users and programmers by maintaining large, hardware-managed
+caches and sophisticated instruction prediction.
+This extra hardware limits the fraction of their silicon area, power, and heat budgets that CPUs can
+allocate to computation.
+For programs or functions like neural network inference or sequential database scans for which it is
+relatively straightforward for programmers to express the behavior of caches — e.g. store a chunk of
+each input matrix and keep it in cache for long enough to compute the related outputs — the result
+is much higher throughput.

@@ -1,0 +1,14 @@
+What is Shared Memory? | GPU Glossary
+Source URL: https://modal.com/gpu-glossary/ (snapshot 2026-10-28)
+
+What is Shared Memory?
+Shared memory is the level of the memory hierarchy corresponding to the thread block level of the
+thread hierarchy in the CUDA programming model .
+It is generally expected to be much smaller but much faster (in throughput and latency) than the
+global memory .
+A fairly typical kernel therefore looks something like this: load data from global memory into
+shared memory perform a number of arithmetic operations on that data via the CUDA Cores and Tensor
+Cores optionally, synchronize threads within a thread block by means of barriers while performing
+those operations write data back into global memory , optionally preventing races across thread
+blocks by means of atomics Shared memory is stored in the L1 data cache of the GPU's Streaming
+Multiprocessor (SM) .
