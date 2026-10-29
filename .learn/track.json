@@ -36,7 +36,16 @@
         "The rescale factor exp(m_old - m_new) has not been derived by hand yet.",
         "Why the merge operator being associative allows a tree reduction is not yet explained in own words."
       ],
-      "notePath": "artifacts/w1-wed-online-softmax-companion.md"
+      "notePath": "artifacts/w1-wed-online-softmax-companion.md",
+      "citations": {
+        "ok": false,
+        "failures": [
+          "\"(before the first heading)\": no source line"
+        ],
+        "unverified": 4,
+        "confirmed": false,
+        "attempts": 1
+      }
     },
     {
       "status": "todo",
