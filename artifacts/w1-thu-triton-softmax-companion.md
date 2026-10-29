@@ -4,6 +4,8 @@ The tutorial source: `sources/triton-02-fused-softmax.py` (snapshot of `python/t
 
 The plan's task: build online softmax with one row per block, starting from this tutorial, and check it against `torch.softmax`. Read Wednesday's companion first; this one assumes the `(m, d)` update.
 
+Source: tutor
+
 ## Before you open the file
 
 ```

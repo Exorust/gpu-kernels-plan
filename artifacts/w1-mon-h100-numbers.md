@@ -4,6 +4,8 @@ The task (README.md line 23): look up five H100 numbers, write one line on what 
 
 How to use this: read each glossary page first, then the matching section here. Write your own one-line "what it limits" before you read mine.
 
+Source: tutor
+
 ## The task as written
 
 ```

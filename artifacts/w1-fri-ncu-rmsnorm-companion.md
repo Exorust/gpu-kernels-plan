@@ -6,6 +6,8 @@ Two halves:
 
 The definitions come from the saved Modal GPU Glossary pages in `sources/modal-glossary/`. The NVIDIA Profiling Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/) is the full reference; you only need the three sections named below.
 
+Source: tutor
+
 ## Running ncu on Modal
 
 ```

@@ -4,6 +4,8 @@ The paper: `sources/online-softmax-1805.02867.pdf` (9 pages; read sections 1-3, 
 
 The paper is short and dense: it gives algorithms and one proof, and leaves out the intuition. This guide puts the intuition back. Keep it open next to the PDF, one section per part of the paper.
 
+Source: tutor
+
 ## Why the plan puts this paper here
 
 ```
