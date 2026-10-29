@@ -17,13 +17,11 @@
       ],
       "notePath": "artifacts/w1-mon-h100-numbers.md",
       "citations": {
-        "ok": false,
-        "failures": [
-          "\"(before the first heading)\": no source line"
-        ],
-        "unverified": 1,
+        "ok": true,
+        "failures": [],
+        "unverified": 2,
         "confirmed": false,
-        "attempts": 1
+        "attempts": 2
       }
     },
     {
