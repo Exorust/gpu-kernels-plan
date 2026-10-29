@@ -34,7 +34,8 @@
         "Why the cost of a tree step is counted in warps with work, not threads with work, is not yet worked through.",
         "Bank conflicts in shared memory and coalescing in global memory are not yet told apart.",
         "Why the 2007 warp-synchronous trick is unsafe on an H100, and what the shuffle version in reduce.py does instead, is not yet connected."
-      ]
+      ],
+      "notePath": "artifacts/w1-tue-reduction-companion.md"
     },
     {
       "status": "todo",
