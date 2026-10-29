@@ -2,6 +2,10 @@
 
 The slides: [reduction.pdf](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (38 slides).
 
+The code:
+- **[`kernels/w1/reduce.py`](../kernels/w1/reduce.py)**: all 7 kernels in one file, runnable on a Modal H100 with `modal run kernels/w1/reduce.py`. It checks each answer and prints time and bandwidth. Kernel numbers match the slides. Kernels 5-7 use warp shuffles for the last warp (see slide 22).
+- **NVIDIA's official version**: [`reduction_kernel.cu`](https://github.com/NVIDIA/cuda-samples/blob/master/cpp/2_Concepts_and_Techniques/reduction/reduction_kernel.cu) in NVIDIA's cuda-samples. Its names are off by one: `reduce0` is the slides' Kernel 1, `reduce6` is Kernel 7. It also uses cooperative groups (`cg::sync(cta)` is the same as `__syncthreads()`), and adds extra versions (`reduce7`, `cg_reduce`) that are not in the slides.
+
 The slides were made for a live talk. The speaker said most of the explanation out loud, and the slides only show the code and the results. This guide puts back what the speaker said. Read **Part 0** first, then keep this guide open next to the PDF and read one section per slide.
 
 ---
