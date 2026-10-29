@@ -38,7 +38,8 @@
       "gaps": [
         "The difference between one HBM pass and one pass over registers is not yet clear.",
         "Mapping Triton programs and masks to CUDA blocks and bounds checks is not yet practiced."
-      ]
+      ],
+      "notePath": "artifacts/w1-thu-triton-softmax-companion.md"
     },
     {
       "status": "todo",
