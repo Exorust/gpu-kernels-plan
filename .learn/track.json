@@ -51,7 +51,16 @@
         "Reading DRAM throughput, achieved occupancy, and warp stall reasons together has not been done yet.",
         "Recognizing a Harris-style reduction inside library calls like cub::BlockReduce is not yet practiced."
       ],
-      "notePath": "artifacts/w1-fri-ncu-rmsnorm-companion.md"
+      "notePath": "artifacts/w1-fri-ncu-rmsnorm-companion.md",
+      "citations": {
+        "ok": false,
+        "failures": [
+          "\"(before the first heading)\": no source line"
+        ],
+        "unverified": 2,
+        "confirmed": false,
+        "attempts": 1
+      }
     }
   ],
   "sessionId": "e386e19d-31a0-4b70-83bf-87db6f7cc02c"
