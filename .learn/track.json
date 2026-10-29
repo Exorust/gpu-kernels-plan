@@ -35,7 +35,14 @@
         "Bank conflicts in shared memory and coalescing in global memory are not yet told apart.",
         "Why the 2007 warp-synchronous trick is unsafe on an H100, and what the shuffle version in reduce.py does instead, is not yet connected."
       ],
-      "notePath": "artifacts/w1-tue-reduction-companion.md"
+      "notePath": "artifacts/w1-tue-reduction-companion.md",
+      "citations": {
+        "ok": true,
+        "failures": [],
+        "unverified": 1,
+        "confirmed": false,
+        "attempts": 1
+      }
     },
     {
       "status": "todo",
