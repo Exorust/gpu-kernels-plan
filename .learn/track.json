@@ -57,13 +57,11 @@
       ],
       "notePath": "artifacts/w1-thu-triton-softmax-companion.md",
       "citations": {
-        "ok": false,
-        "failures": [
-          "\"(before the first heading)\": no source line"
-        ],
-        "unverified": 3,
+        "ok": true,
+        "failures": [],
+        "unverified": 4,
         "confirmed": false,
-        "attempts": 1
+        "attempts": 2
       }
     },
     {
