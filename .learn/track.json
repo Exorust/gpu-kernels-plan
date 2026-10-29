@@ -2,8 +2,53 @@
   "version": 1,
   "goal": "Can you load this whole folder it’s a learning plan",
   "kind": "folder",
-  "stage": "interview",
+  "stage": "planned",
   "current": 0,
-  "steps": [],
+  "steps": [
+    {
+      "status": "todo",
+      "id": "s1",
+      "title": "Mon: H100 numbers and the roofline ridge point",
+      "why": "Every later prediction (reduction bandwidth, softmax, RMSNorm) is built from these five numbers, so they come first.",
+      "kind": "teach",
+      "gaps": [
+        "Turning a hardware number into a lower bound on a specific kernel time is not yet practiced.",
+        "The ridge point differs between CUDA cores and tensor cores, and that split is not yet in the notes."
+      ]
+    },
+    {
+      "status": "todo",
+      "id": "s2",
+      "title": "Wed: online softmax, derive the rescale step",
+      "why": "Comes after Tuesday reduction because the parallel version of online softmax is a tree reduction over (max, sum) pairs.",
+      "kind": "teach",
+      "gaps": [
+        "The rescale factor exp(m_old - m_new) has not been derived by hand yet.",
+        "Why the merge operator being associative allows a tree reduction is not yet explained in own words."
+      ]
+    },
+    {
+      "status": "todo",
+      "id": "s3",
+      "title": "Thu: Triton fused softmax to one-pass online softmax",
+      "why": "Builds Wednesday derivation into code; needs the rescale step before writing the chunk loop.",
+      "kind": "teach",
+      "gaps": [
+        "The difference between one HBM pass and one pass over registers is not yet clear.",
+        "Mapping Triton programs and masks to CUDA blocks and bounds checks is not yet practiced."
+      ]
+    },
+    {
+      "status": "todo",
+      "id": "s4",
+      "title": "Fri: Nsight Compute numbers and the reduction in vLLM RMSNorm",
+      "why": "Last, because reading the profile and the production kernel both need the bandwidth targets from Monday and the reduction from Tuesday.",
+      "kind": "teach",
+      "gaps": [
+        "Reading DRAM throughput, achieved occupancy, and warp stall reasons together has not been done yet.",
+        "Recognizing a Harris-style reduction inside library calls like cub::BlockReduce is not yet practiced."
+      ]
+    }
+  ],
   "sessionId": "e386e19d-31a0-4b70-83bf-87db6f7cc02c"
 }
