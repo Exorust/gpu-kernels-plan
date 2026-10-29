@@ -80,13 +80,11 @@
       ],
       "notePath": "artifacts/w1-fri-ncu-rmsnorm-companion.md",
       "citations": {
-        "ok": false,
-        "failures": [
-          "\"(before the first heading)\": no source line"
-        ],
-        "unverified": 2,
+        "ok": true,
+        "failures": [],
+        "unverified": 3,
         "confirmed": false,
-        "attempts": 1
+        "attempts": 2
       }
     }
   ],
