@@ -1,318 +1,804 @@
-# Companion to "Optimizing Parallel Reduction in CUDA" (Mark Harris)
+# Reading guide: "Optimizing Parallel Reduction in CUDA" (Mark Harris)
 
-Read this next to the slides: [reduction.pdf](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (38 slides). One section per slide. Each section has what the slide says, what it means, and what is different on an H100 today.
+The slides: [reduction.pdf](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (38 slides).
 
-**Before you start: three facts about the slides.**
-1. They are from 2007 and use the **G80** GPU (GeForce 8800). Its memory bandwidth is 86.4 GB/s. The H100 has 3,350 GB/s, 39 times more. The ideas still hold; the absolute numbers do not.
-2. The input is `int`, not `float`. Same size (4 bytes), same reasoning.
-3. One trick (slides 21-22, 26, 35) is **unsafe on GPUs since 2017**. The section for slide 22 explains why and gives the safe version.
+The slides were made for a live talk. The speaker said most of the explanation out loud, and the slides only show the code and the results. This guide puts back what the speaker said. Read **Part 0** first, then keep this guide open next to the PDF and read one section per slide.
 
-**Words used throughout**
+---
 
-| Word | Meaning |
-|---|---|
-| Reduction | Combine many values into one with an operation like `+` or `max`. Here: sum an array. |
-| Thread block | A group of threads (here 128) that runs on one SM and can share memory and wait for each other. |
-| Shared memory | Fast memory inside each SM, shared by the threads of one block. Declared `__shared__`. |
-| `__syncthreads()` | Every thread in the block waits here until all threads in the block arrive. |
-| Warp | 32 threads that execute the same instruction at the same time. The hardware schedules warps, not single threads. |
-| Divergence | Threads in one warp take different sides of an `if`. The warp runs both sides, one after the other, with some threads switched off. |
-| Bank | Shared memory is split into 32 banks. Two threads of one warp reading different addresses in the same bank must wait for each other (a bank conflict). |
-| Coalescing | When the 32 threads of a warp read 32 neighbouring addresses, the hardware combines them into a few large memory transactions. |
+## Part 0: What you need to know before slide 1
+
+### The task
+
+You have 4 million integers in GPU memory. You want their sum.
+
+On a CPU, this is one loop:
+
+```c
+int sum = 0;
+for (int i = 0; i < n; i++) sum += a[i];
+```
+
+The loop does one addition at a time, 4 million times in a row.
+
+A GPU has thousands of threads that can run at the same time. You want all of them to add numbers at once. But in the end, there must be **one** number. So the threads must combine their partial results. The whole talk is about how to do that combining fast.
+
+This operation (combine many values into one value with `+`, `max`, or similar) is called a **reduction**.
+
+### How a GPU program is organized
+
+A **kernel** is a function that runs on the GPU. You start it from the CPU like this:
+
+```cuda
+myKernel<<<numBlocks, threadsPerBlock, sharedBytes>>>(arguments);
+```
+
+This starts `numBlocks × threadsPerBlock` threads. **Every thread runs the same function.** The only difference between threads is their ID numbers:
+
+- `threadIdx.x`: the thread's number inside its block (0, 1, 2, ... up to `threadsPerBlock - 1`).
+- `blockIdx.x`: the block's number (0, 1, 2, ... up to `numBlocks - 1`).
+- `blockDim.x`: the number of threads per block (the same for every thread).
+
+The threads use these numbers to decide which part of the data to work on.
+
+**Example.** 16 numbers, 2 blocks of 8 threads. Each thread computes `i = blockIdx.x * blockDim.x + threadIdx.x`:
+
+| | Thread 0 | Thread 1 | ... | Thread 7 |
+|---|---|---|---|---|
+| Block 0 | i = 0 | i = 1 | ... | i = 7 |
+| Block 1 | i = 8 | i = 9 | ... | i = 15 |
+
+So block 0 works on elements 0-7 and block 1 works on elements 8-15.
+
+### Blocks: what threads in a block can and cannot do
+
+Threads are grouped into **blocks**. One block runs on one **SM** (streaming multiprocessor, one of the GPU's processors; the G80 GPU in the slides has 16, an H100 has 132).
+
+Threads **in the same block** can:
+1. Share a small, fast memory called **shared memory**.
+2. Wait for each other with `__syncthreads()`. When a thread reaches this line, it stops until every thread in its block reaches the same line.
+
+Threads **in different blocks** can do neither. They cannot see each other's shared memory, and they cannot wait for each other.
+
+### Two kinds of memory
+
+| | Global memory | Shared memory |
+|---|---|---|
+| Where | The GPU's main memory chips (HBM on an H100) | Inside each SM |
+| Size | Gigabytes | Tens of kilobytes per SM |
+| Speed | Slow to reach (hundreds of clock cycles) | Fast (a few cycles) |
+| Who sees it | All threads in all blocks | Only the threads of one block |
+| In code | Normal pointers passed to the kernel, like `g_idata` | Arrays declared `__shared__`, like `sdata` |
+
+The input array is in global memory. The usual plan: each block copies its part of the input into shared memory, does the work there, and writes one result back to global memory.
+
+### Warps: how the hardware actually runs threads
+
+The hardware does not run threads one by one. It runs them in groups of **32 consecutive threads**, called a **warp**. In a block of 128 threads:
+
+- Warp 0 = threads 0-31
+- Warp 1 = threads 32-63
+- Warp 2 = threads 64-95
+- Warp 3 = threads 96-127
+
+The hardware issues **one instruction for the whole warp**. All 32 threads do that instruction at the same time.
+
+This matters for `if` statements. Suppose that in one warp, the `if` is true for 1 thread and false for 31. The warp still spends the full time running the body of the `if`. The 31 threads with a false condition are switched off during that time; they do nothing useful, but they do not save any time either.
+
+**So the cost of a step is the number of warps that have at least one thread with work, not the number of threads with work.** This is the most important idea for slides 9-12.
+
+Two threads in the same warp that take different sides of an `if` is called **divergence**.
 
 ---
 
 ## Slide 1: Title
 
-Nothing to read. Mark Harris works on NVIDIA's developer technology team. He later wrote much of NVIDIA's CUDA blog.
+Mark Harris worked on NVIDIA's developer technology team. This talk is from 2007 and is the standard first example of how to make a GPU kernel fast.
 
 ## Slide 2: Parallel Reduction
 
-**Says:** reduction is common, easy to write, hard to make fast. The talk improves one kernel through 7 versions.
+The speaker gives three reasons for the topic:
 
-**Means:** reduction appears inside most kernels you will read in this plan: the sum in LayerNorm and RMSNorm, the max and sum in softmax, the sum of partial results in split-K GEMM and Flash-Decoding. The 7 versions are a list of the standard GPU performance problems, one per version.
+- **"Common and important."** Many programs need sums, maximums and minimums of large arrays. Inside the kernels later in this plan, reductions are everywhere: LayerNorm sums the squares of a row; softmax finds the maximum of a row and then sums it.
+- **"Easy to implement, harder to get right."** A first version takes 15 lines. A fast version takes much more thought. The first version in the talk is 30 times slower than the last one.
+- **"Seven different versions."** The talk writes the kernel 7 times. Each version fixes one performance problem. The problems are the ones you meet in almost every GPU kernel, so the talk is a tour of them.
 
-## Slide 3: Parallel Reduction (tree)
+## Slide 3: Parallel Reduction (the tree)
 
-**Says:** inside a block, sum as a tree: 8 values become 4, then 2, then 1. Use many blocks so large arrays fit and all SMs stay busy. Question: how do blocks combine their results?
+**On this slide:** 8 numbers at the top, added in pairs, level by level, until one number (25) is left.
 
-**Means:** the tree takes log2(N) steps. 8 values need 3 steps; 128 values need 7. At each step, half of the remaining values are added to the other half. Each block produces one partial sum. Blocks cannot read each other's shared memory, so the partial sums must go through global memory (HBM).
+**How the tree works.** Start with 8 numbers: `3 1 7 0 4 1 6 3`.
 
-**Today:** 132 SMs on an H100. You need at least 132 blocks, and usually several per SM, to keep all SMs busy.
+- Level 1: add neighbours in pairs. `3+1=4`, `7+0=7`, `4+1=5`, `6+3=9`. Now there are 4 numbers. These 4 additions do not depend on each other, so 4 threads can do them **at the same time**.
+- Level 2: `4+7=11`, `5+9=14`. 2 numbers, 2 threads.
+- Level 3: `11+14=25`. 1 number, 1 thread.
+
+A CPU loop needs 7 additions in a row. The tree also does 7 additions, but in only **3 steps**, because the additions in one level happen at the same time. In general, N numbers need log2(N) steps: 128 numbers need 7 steps, 1024 numbers need 10.
+
+**Why many blocks?** The tree runs inside one block, because the threads must share the numbers (shared memory) and wait for each other between levels (`__syncthreads()`). But:
+
+1. A block can have at most 512 threads on the G80 (1024 on an H100). So one block can sum only about that many numbers.
+2. One block runs on one SM. The rest of the GPU would do nothing.
+
+So the array is split into pieces. Each block sums its piece with a tree and produces **one partial sum**. With 4 million numbers and 128 threads per block, that is 32,768 blocks and 32,768 partial sums.
+
+**The open question at the bottom of the slide:** the 32,768 partial sums are in 32,768 different blocks. How do we add them together, when blocks cannot share memory or wait for each other?
 
 ## Slide 4: Problem: Global Synchronization
 
-**Says:** there is no way to make all blocks wait for each other inside a kernel. The fix: end the kernel. The next kernel launch starts only after all blocks of the previous one have finished.
+**The idea the slide starts with.** "Let every block write its partial sum to global memory. Then all blocks wait until every block has finished. Then one block adds the partial sums." The "all blocks wait" part is called a **global synchronization**: a `__syncthreads()` for the whole GPU instead of one block.
 
-**Means:** a kernel launch is a barrier for the whole GPU. Why no barrier inside a kernel? If you launch more blocks than can be resident on the GPU at once, the blocks that are waiting at the barrier hold their SM. The blocks that have not started can never run. Every block waits forever (a deadlock).
+**CUDA has no such instruction. Why?** The slide gives two reasons. The second one needs explanation.
 
-**Today:** two other options exist. (a) Cooperative groups `grid.sync()` gives a barrier inside a kernel, but only if every block fits on the GPU at once, which is exactly the limit this slide describes. (b) `atomicAdd` on one global value: each block adds its partial sum to it. Production code (for example NVIDIA's CUB library) uses one or two kernel launches, or atomics.
+The GPU does not run all 32,768 blocks at the same time. It runs as many as fit on its SMs. On the G80, roughly 16 SMs × 8 blocks = 128 blocks run at once. The other blocks wait in a queue. When a running block finishes, its SM takes the next block from the queue.
+
+Now suppose there was a global wait. The first 128 blocks start, compute their partial sums, and reach the wait. They stop there until all 32,768 blocks arrive. But the other 32,640 blocks are still in the queue. They can start only when a running block finishes, and no running block will finish, because they are all waiting. Every block waits forever. This is a **deadlock**.
+
+The only way to avoid it is to start no more blocks than fit on the GPU at once. That is the slide's "no more than # multiprocessors × # resident blocks / multiprocessor". This limits how you can write your program, so CUDA does not offer it.
+
+**The solution on the slide: use two kernels.** When a kernel finishes, every one of its blocks has finished. So:
+
+1. Kernel 1: each block computes its partial sum and writes it to global memory.
+2. Kernel 1 ends. Now all partial sums are in global memory.
+3. Kernel 2: reads the partial sums and adds them.
+
+The end of one kernel and the start of the next is the global wait we wanted. The slide says this costs very little.
+
+**Today:** CUDA now has a global wait inside a kernel (cooperative groups `grid.sync()`), but it has exactly the restriction above: all blocks must fit on the GPU at once. Another common option today: each block does `atomicAdd(&total, partialSum)`, which adds its partial sum directly to one global number.
 
 ## Slide 5: Kernel Decomposition
 
-**Says:** level 0 runs 8 blocks and writes 8 partial sums. Level 1 runs 1 block on those 8 values. The same kernel code works for every level.
+**On this slide:** 64 numbers in 8 groups of 8. "Level 0: 8 blocks" sums each group into one number (each group is `3 1 7 0 4 1 6 3`, so each sum is 25). "Level 1: 1 block" sums the 8 results.
 
-**Means:** call the kernel again on its own output until one value is left. With 4M elements and 128 threads per block: level 0 has 32,768 blocks, level 1 has 256, level 2 has 2, level 3 has 1.
+**The point:** level 1 is the same problem as level 0, only smaller. So it uses **the same kernel**, just started again with the output of the previous level as its input.
+
+**With real numbers** (4,194,304 numbers, 128 threads per block, each block sums 128 numbers):
+
+| Launch | Input numbers | Blocks | Output numbers |
+|---|---|---|---|
+| 1 | 4,194,304 | 32,768 | 32,768 |
+| 2 | 32,768 | 256 | 256 |
+| 3 | 256 | 2 | 2 |
+| 4 | 2 | 1 | 1 |
+
+Almost all the time is spent in launch 1, because it reads all 16 MB of input. The later launches handle very little data. The timings in the rest of the talk are for this whole process.
 
 ## Slide 6: What Is Our Optimization Goal?
 
-**Says:** measure GFLOP/s for compute-bound kernels, bandwidth for memory-bound kernels. Reduction does 1 operation per element loaded, so measure bandwidth. G80 peak: 384-bit bus × 1800 MHz effective ÷ 8 = 86.4 GB/s.
+**The question:** how do we know when the kernel is fast enough? Compare it with the limit of the hardware.
 
-**Means:** this is the Monday roofline lesson. 1 add per 4-byte element = 0.25 FLOPs per byte. The H100 CUDA-core ridge point is about 20 FLOPs per byte, so a reduction is far into the memory-bound region. The only number that matters is GB/s as a percentage of peak.
+**There are two limits.** A GPU can only do math so fast (measured in GFLOP/s, billions of operations per second), and it can only read memory so fast (measured in GB/s). Which limit matters depends on the kernel:
 
-How to compute bandwidth: bytes read ÷ time. For 2^22 ints: 2^22 × 4 = 16.8 MB. Every bandwidth number in the slides is this 16.8 MB divided by the time.
+- If a kernel does a lot of math for each number it reads, the math is the limit. Measure GFLOP/s.
+- If a kernel does little math for each number, reading the numbers is the limit. Measure GB/s.
 
-**Today:** peak is 3,350 GB/s on an H100 SXM. No real kernel reaches 100%; a simple copy kernel is the practical ceiling to compare against.
+**Reduction does almost no math.** Each number is read once and used in one addition. The GPU can add much faster than it can read numbers from memory. So the limit is memory. The goal: read the input as close to the memory's top speed as possible.
 
-## Slide 7: Reduction #1: Interleaved Addressing (code)
+**How to measure it:** bandwidth = bytes read ÷ time. For example, 2^22 integers × 4 bytes = 16.8 MB. If the kernel takes 8 ms, bandwidth = 16.8 MB ÷ 0.008 s = 2.1 GB/s.
 
-**Says:** the first kernel.
+**The G80's top memory speed:**
+- The memory bus is 384 bits wide = 48 bytes per transfer.
+- The memory clock is 900 MHz, and DDR memory makes 2 transfers per clock = 1,800 million transfers per second.
+- 48 bytes × 1,800 million per second = **86.4 GB/s**.
 
-**Means, line by line:**
-- `extern __shared__ int sdata[];` shared memory array. Its size is set at launch (the third `<<< >>>` argument).
-- `tid = threadIdx.x` is the thread's number inside the block (0-127). `i = blockIdx.x*blockDim.x + threadIdx.x` is its position in the whole array.
-- `sdata[tid] = g_idata[i];` each thread copies one element from global memory into shared memory. This read is coalesced: thread 0 reads element 0, thread 1 reads element 1, and so on.
-- `__syncthreads();` wait until all 128 values are in shared memory.
-- The loop: `s` (the stride) is 1, 2, 4, ..., 64. At each step, threads whose `tid` is a multiple of `2*s` add the value `s` positions to their right.
-- Thread 0 writes the block's sum.
+Every result in the talk should be compared with 86.4 GB/s. For your H100 work, the number is 3,350 GB/s.
 
-(The slide calls the function `reduce0`, slide 9 calls it `reduce1`. Same code.)
+## Slide 7: Reduction #1: Interleaved Addressing (the code)
 
-## Slide 8: Interleaved Addressing (diagram)
+**On this slide:** the first version of the kernel.
 
-**Says:** 16 values, 4 steps. Step 1 (stride 1): threads 0, 2, 4, ..., 14 work. Step 2 (stride 2): threads 0, 4, 8, 12. Step 3: threads 0, 8. Step 4: thread 0. The sum, 41, ends in position 0.
+Walk through it with a small block of **8 threads** (the talk uses 128, but 8 is easier to follow). Suppose this is block 1, so it handles elements 8-15.
 
-**Means:** follow one number. Position 0 starts as 10. Step 1: 10 + 1 = 11. Step 2: 11 + 7 = 18. Step 3: 18 + 6 = 24. Step 4: 24 + 17 = 41. Check one step yourself on paper; it makes the next slides easier.
+```cuda
+__global__ void reduce0(int *g_idata, int *g_odata) {
+```
+`g_idata` is the input array in global memory. `g_odata` is the output array: one partial sum per block.
 
-## Slide 9: Reduction #1, the problem
+```cuda
+  extern __shared__ int sdata[];
+```
+An array in shared memory. Its size is not written here; it comes from the third number in `<<< >>>` when the kernel starts (128 threads × 4 bytes = 512 bytes). Each block gets its own copy.
 
-**Says:** the `if (tid % (2*s) == 0)` makes warps highly divergent, and `%` is slow.
+```cuda
+  unsigned int tid = threadIdx.x;
+  unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
+  sdata[tid] = g_idata[i];
+```
+Each thread copies one number from global memory into shared memory. Thread 3 of block 1: `tid = 3`, `i = 1×8 + 3 = 11`, so it copies `g_idata[11]` into `sdata[3]`.
 
-**Means:** with 128 threads there are 4 warps (threads 0-31, 32-63, 64-95, 96-127). At step 1 the working threads are 0, 2, 4, ...: half of every warp. All 4 warps must run the add instruction, each with half its threads switched off. At step 2, a quarter of each warp works, but all 4 warps still run. Until the stride reaches 32, every warp runs every step while doing less and less useful work. `%` (integer remainder) takes many instructions on a GPU; division hardware is slow.
+Why copy at all? The tree reads and writes each position several times. Shared memory is much faster than global memory for that.
 
-## Slide 10: Performance, Kernel 1
+```cuda
+  __syncthreads();
+```
+Wait until every thread has finished its copy. Without this line, thread 0 might try to add `sdata[1]` before thread 1 has written it.
 
-**Says:** 2^22 ints (the PDF text shows "222"; it is 2 to the power 22, about 4M) take 8.054 ms, which is 2.083 GB/s. Block size is 128 for every test.
+```cuda
+  for (unsigned int s=1; s < blockDim.x; s *= 2) {
+     if (tid % (2*s) == 0) {
+         sdata[tid] += sdata[tid + s];
+     }
+     __syncthreads();
+  }
+```
+This is the tree. `s` is the **stride**: the distance between the two numbers being added. It is 1, then 2, then 4.
 
-**Means:** 2.083 ÷ 86.4 = 2.4% of peak. The kernel is far from memory-bound. Something other than memory is slow: the instructions.
+`tid % (2*s)` is the remainder of `tid` divided by `2*s`. So `tid % (2*s) == 0` means "tid is a multiple of 2s". Only those threads add.
 
-## Slide 11: Reduction #2 (code)
+With 8 threads and input values `a0 ... a7` in `sdata`:
 
-**Says:** replace `if (tid % (2*s) == 0) sdata[tid] += ...` with `index = 2*s*tid; if (index < blockDim.x) sdata[index] += sdata[index + s];`.
+| Step | s | Threads that add (multiples of 2s) | What they do |
+|---|---|---|---|
+| 1 | 1 | 0, 2, 4, 6 | `sdata[0] += sdata[1]`, `sdata[2] += sdata[3]`, `sdata[4] += sdata[5]`, `sdata[6] += sdata[7]` |
+| 2 | 2 | 0, 4 | `sdata[0] += sdata[2]`, `sdata[4] += sdata[6]` |
+| 3 | 4 | 0 | `sdata[0] += sdata[4]` |
 
-**Means:** the same pairs are added, but different threads do the work. Before: thread 2 handled position 2. Now: thread 1 handles position 2, thread 2 handles position 4. The working threads are now always the lowest-numbered ones. The `%` is gone too.
+After step 3, `sdata[0]` holds the sum of all 8 values.
 
-## Slide 12: Reduction #2 (diagram), new problem: bank conflicts
+The `__syncthreads()` inside the loop is needed because each step reads values written in the step before. In step 2, thread 0 reads `sdata[2]`, which thread 2 wrote in step 1.
 
-**Says:** same values, same result, but threads 0-7 do step 1, threads 0-3 do step 2, and so on. New problem: shared memory bank conflicts.
+```cuda
+  if (tid == 0) g_odata[blockIdx.x] = sdata[0];
+}
+```
+Thread 0 writes the block's sum to the output array, at the position of this block. The next kernel launch (slide 5) sums these outputs.
 
-**Means: why divergence is fixed.** At step 1 with 128 threads, threads 0-63 work: warps 0 and 1 are full, warps 2 and 3 have no work and skip the instruction. Whole warps stop instead of running with threads switched off.
+## Slide 8: Interleaved Addressing (the diagram)
 
-**Means: why bank conflicts appear.** Shared memory has 32 banks. A 4-byte value at index `k` is in bank `k mod 32`. At stride 1, thread `t` reads `sdata[2t]`. Thread 0 reads index 0 (bank 0), thread 16 reads index 32 (bank 0 too). Two threads in one warp want different addresses in the same bank, so they wait in turn: a 2-way conflict. At stride 2, thread `t` reads index `4t`; threads 0, 8, 16, 24 all hit bank 0: a 4-way conflict. The conflicts get worse as the stride grows.
+**On this slide:** the same algorithm drawn for 16 values. Each row shows the contents of shared memory after a step. The "Thread IDs" row shows which threads do an addition in that step.
+
+Check the first step yourself. The starting values are:
+
+```
+position:  0  1  2   3  4   5  6  7   8   9  10 11  12  13  14 15
+value:    10  1  8  -1  0  -2  3  5  -2  -3   2  7   0  11   0  2
+```
+
+Step 1 (stride 1): threads 0, 2, 4, ..., 14 each add the value one position to the right.
+- Thread 0: position 0 = 10 + 1 = **11**
+- Thread 2: position 2 = 8 + (-1) = **7**
+- Thread 4: position 4 = 0 + (-2) = **-2**
+- ...and so on. This matches the slide's second row: `11 1 7 -1 -2 -2 8 5 ...`
+
+The odd positions keep their old values. Nobody reads them again, so it does not matter.
+
+Follow position 0 to the end: 10 → 11 (step 1) → 18 (step 2, adds position 2) → 24 (step 3, adds position 4) → **41** (step 4, adds position 8). 41 is the sum of all 16 values.
+
+**Look at which threads work:** 0, 2, 4, 6, ...; then 0, 4, 8, 12; then 0, 8; then 0. The working threads are **spread out**, with gaps between them. Slide 9 explains why that is slow.
+
+## Slide 9: Reduction #1: the problem
+
+**On this slide:** the same code, with a note: "highly divergent warps are very inefficient, and % operator is very slow."
+
+**Problem 1: divergence.** Go back to Part 0: a warp is 32 threads, and a step costs one unit of time **for each warp that has at least one thread with work**.
+
+With 128 threads there are 4 warps. Count, for each step, which warps contain a working thread:
+
+| s | Threads that add | How many add | Warps that must run |
+|---|---|---|---|
+| 1 | 0, 2, 4, ..., 126 | 64 | all 4 (every warp has even-numbered threads) |
+| 2 | 0, 4, 8, ..., 124 | 32 | all 4 |
+| 4 | 0, 8, 16, ..., 120 | 16 | all 4 |
+| 8 | 0, 16, 32, ..., 112 | 8 | all 4 |
+| 16 | 0, 32, 64, 96 | 4 | all 4 (one thread in each warp) |
+| 32 | 0, 64 | 2 | 2 |
+| 64 | 0 | 1 | 1 |
+| | | **127 additions** | **23 warp-steps** |
+
+At s = 16, only 4 threads do work, but all 4 warps must run, each with 31 of 32 threads switched off. The working threads are spread across all warps, so no warp can stop early.
+
+**Problem 2: the `%` operator.** A GPU has no fast hardware for integer division, and `%` (remainder) needs a division. It compiles into many instructions. Every thread computes it in every step.
+
+## Slide 10: Performance for 4M element reduction
+
+**On this slide:** a table with one row. Kernel 1 takes 8.054 ms for 2^22 integers, which is 2.083 GB/s. Note: block size is 128 threads for all tests.
+
+(The PDF shows "222 ints". It means 2 to the power 22 = 4,194,304. The superscript was lost.)
+
+**What the number means:** 2.083 GB/s ÷ 86.4 GB/s = **2.4%** of the memory's top speed. The memory could deliver the data about 40 times faster than the kernel uses it. So memory is not what slows this kernel down. The kernel is busy with its own instructions: the `%`, the `if`, the warps running with most threads switched off.
+
+Each row added in the later tables is one more version. Watch the percentage go up.
+
+## Slide 11: Reduction #2: Interleaved Addressing (the code change)
+
+**On this slide:** the old loop at the top, the new loop at the bottom.
+
+New loop:
+
+```cuda
+for (unsigned int s=1; s < blockDim.x; s *= 2) {
+    int index = 2 * s * tid;
+    if (index < blockDim.x) {
+        sdata[index] += sdata[index + s];
+    }
+    __syncthreads();
+}
+```
+
+**The additions are exactly the same as before. Only the thread that does each addition changes.**
+
+In version 1, the thread number was the position: thread 2 worked on position 2. In version 2, each thread computes a position `index = 2 × s × tid`:
+
+| s | Positions to add (same as before) | Version 1: which threads | Version 2: which threads |
+|---|---|---|---|
+| 1 | 0, 2, 4, 6, ... | 0, 2, 4, 6, ... | 0, 1, 2, 3, ... |
+| 2 | 0, 4, 8, 12, ... | 0, 4, 8, 12, ... | 0, 1, 2, 3, ... |
+| 4 | 0, 8, 16, ... | 0, 8, 16, ... | 0, 1, 2, ... |
+
+Check: at s = 2, thread 1 computes `index = 2 × 2 × 1 = 4`. So thread 1 adds position 6 into position 4. In version 1, thread 4 did that.
+
+`if (index < blockDim.x)` switches off the threads whose position would be past the end of the array.
+
+The `%` is gone too.
+
+## Slide 12: Interleaved Addressing (diagram), and a new problem
+
+**On this slide:** the same 16 values, the same results as slide 8 (41 at the end), but the thread IDs are now 0-7, then 0-3, then 0-1, then 0. At the bottom: "New Problem: Shared Memory Bank Conflicts".
+
+**Why divergence is fixed.** The working threads are now always the lowest-numbered ones, packed together. Count warps again with 128 threads:
+
+| s | Threads that add | Warps that must run |
+|---|---|---|
+| 1 | 0-63 | 2 (warps 0 and 1 are full; warps 2 and 3 have no work and skip) |
+| 2 | 0-31 | 1 |
+| 4 | 0-15 | 1 |
+| 8 | 0-7 | 1 |
+| 16 | 0-3 | 1 |
+| 32 | 0-1 | 1 |
+| 64 | 0 | 1 |
+| | | **8 warp-steps** (version 1: 23) |
+
+Same 127 additions, about a third of the warp work.
+
+**The new problem: bank conflicts.** To understand this, you need to know how shared memory is built.
+
+Shared memory is split into **32 banks**. Consecutive 4-byte numbers go to consecutive banks, and then it wraps around:
+
+```
+sdata index:  0   1   2  ...  31   32  33  ...  63   64 ...
+bank:         0   1   2  ...  31    0   1  ...  31    0 ...
+```
+
+(Bank = index mod 32.)
+
+Each bank can deliver **one number per clock cycle**. When the 32 threads of a warp read shared memory:
+- If all 32 threads read from 32 **different** banks: 1 cycle.
+- If 2 threads read **different** numbers in the **same** bank: that bank must deliver them one after the other: 2 cycles. This is a **2-way bank conflict**.
+- If 4 threads hit the same bank: 4 cycles. And so on.
+
+Now look at version 2. At s = 1, thread `t` reads `sdata[2t]`:
+
+| Thread | 0 | 1 | 2 | ... | 15 | 16 | 17 | ... | 31 |
+|---|---|---|---|---|---|---|---|---|---|
+| Index read | 0 | 2 | 4 | ... | 30 | 32 | 34 | ... | 62 |
+| Bank | 0 | 2 | 4 | ... | 30 | **0** | **2** | ... | 30 |
+
+Threads 0 and 16 both use bank 0. Threads 1 and 17 both use bank 2. Every bank that is used is used twice, and the odd banks are not used at all. 2-way conflict: the read takes twice as long.
+
+At s = 2, thread `t` reads `sdata[4t]`: banks 0, 4, 8, ..., each used by 4 threads. 4-way conflict. The larger the stride, the worse it gets.
+
+So version 2 fixed one problem (divergence) and the way it spaces out its reads created another one.
+
+(Small detail: the G80 had 16 banks and checked conflicts per half-warp of 16 threads. The idea is the same. The numbers above are for current GPUs.)
 
 ## Slide 13: Performance, Kernel 2
 
-**Says:** 3.456 ms, 4.854 GB/s, 2.33 times faster.
+**New row:** 3.456 ms, 4.854 GB/s. "Step speedup" 2.33x means 2.33 times faster than the version before. "Cumulative speedup" means faster than Kernel 1.
 
-**Means:** removing divergence and `%` more than doubled the speed. Still only 5.6% of peak.
+4.854 ÷ 86.4 = **5.6%** of top speed. Better, still far from the limit.
 
 ## Slide 14: Sequential Addressing (diagram)
 
-**Says:** reverse the order. Step 1 (stride 8): threads 0-7 each add the value 8 positions away. Step 2 (stride 4): threads 0-3. The sum, 41, ends in position 0. "Sequential addressing is conflict free."
+**On this slide:** a new pattern. Instead of adding neighbours first, add the far half first. With 16 values, step 1 has stride 8: thread `t` adds position `t + 8` into position `t`.
 
-**Means:** at each step, thread `t` reads `sdata[t]` and `sdata[t + s]`. Neighbouring threads read neighbouring addresses, so the 32 threads of a warp read 32 different banks. No conflicts. The working threads are still the lowest-numbered ones, so divergence stays fixed.
+Check step 1 with the starting values:
 
-## Slide 15: Reduction #3 (code)
+| Thread | Adds | Result in position t |
+|---|---|---|
+| 0 | 10 + (-2) | 8 |
+| 1 | 1 + (-3) | -2 |
+| 2 | 8 + 2 | 10 |
+| 3 | -1 + 7 | 6 |
+| 4 | 0 + 0 | 0 |
+| 5 | -2 + 11 | 9 |
+| 6 | 3 + 0 | 3 |
+| 7 | 5 + 2 | 7 |
 
-**Says:** `for (s = blockDim.x/2; s > 0; s >>= 1) { if (tid < s) sdata[tid] += sdata[tid + s]; __syncthreads(); }`
+This matches the slide's second row: `8 -2 10 6 0 9 3 7`. Positions 8-15 are not used again.
 
-**Means:** `s >>= 1` divides `s` by 2. With 128 threads, `s` is 64, 32, 16, 8, 4, 2, 1. This is the version the Tuesday plan stops at.
+Step 2 (stride 4): threads 0-3 add positions 4-7 into positions 0-3. Step 3 (stride 2): threads 0-1. Step 4 (stride 1): thread 0. The result is again 41 in position 0.
+
+**Why there are no bank conflicts.** At every step, thread `t` reads `sdata[t]` and `sdata[t + s]`. The 32 threads of a warp read 32 **consecutive** positions, which are in 32 **different** banks. Every read takes 1 cycle.
+
+**Divergence is still fixed.** The working threads are still 0, 1, 2, ... packed together.
+
+## Slide 15: Reduction #3: Sequential Addressing (the code)
+
+New loop:
+
+```cuda
+for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+    if (tid < s) {
+        sdata[tid] += sdata[tid + s];
+    }
+    __syncthreads();
+}
+```
+
+- The stride starts at half the block size (64 for 128 threads) and gets smaller.
+- `s >>= 1` shifts `s` right by one bit, which divides it by 2. So `s` is 64, 32, 16, 8, 4, 2, 1.
+- `if (tid < s)`: the first `s` threads work.
+
+This is shorter and simpler than both earlier versions. That often happens: the version with the best memory access pattern is also the clearest.
 
 ## Slide 16: Performance, Kernel 3
 
-**Says:** 1.722 ms, 9.741 GB/s, 2.01 times faster. 4.68 times faster than Kernel 1 in total.
+**New row:** 1.722 ms, 9.741 GB/s, 2 times faster than Kernel 2.
 
-**Means:** 11% of peak. Two problems fixed (divergence, bank conflicts) and still far from the memory limit.
+9.741 ÷ 86.4 = **11%**. Two problems are fixed. The kernel still uses only a ninth of the memory speed.
 
 ## Slide 17: Idle Threads
 
-**Says:** in the first step of the loop, half of the threads do nothing.
+**On this slide:** the version 3 loop and the remark "Half of the threads are idle on first loop iteration!"
 
-**Means:** with 128 threads, step 1 uses 64. Those 128 threads were needed only to load 128 values, and then half of them wait. The waste: a thread was started, given registers, and scheduled to do one load.
+**What this means.** The block has 128 threads. Look at what they do:
+
+- Every thread loads one number. All 128 are busy.
+- Step 1 (s = 64): threads 0-63 add. **Threads 64-127 do nothing from now on.**
+- Step 2 (s = 32): threads 0-31 add. Threads 32-63 do nothing from now on.
+- ...and so on.
+
+Half the threads exist only to do one load. A thread is not free: it needs registers, a place on the SM, and scheduling. We launch twice as many threads as the tree can use.
 
 ## Slide 18: Reduction #4: First Add During Load
 
-**Says:** launch half as many blocks. Each thread loads two values and adds them before writing to shared memory: `sdata[tid] = g_idata[i] + g_idata[i + blockDim.x];`.
+**The fix:** let each thread load **two** numbers and add them right away. Then each block of 128 threads handles 256 numbers, and you need half as many blocks.
 
-**Means:** the first step of the tree now happens while loading, in registers, with no shared memory and no `__syncthreads()`. Each block now covers 256 elements with 128 threads. Note `i + blockDim.x`, not `i + 1`: the second read is also coalesced, because thread 0 reads element 128, thread 1 reads 129, and so on.
+Old start of the kernel:
+
+```cuda
+unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
+sdata[tid] = g_idata[i];
+```
+
+New start:
+
+```cuda
+unsigned int i = blockIdx.x*(blockDim.x*2) + threadIdx.x;
+sdata[tid] = g_idata[i] + g_idata[i+blockDim.x];
+```
+
+**Example.** Block 0, 128 threads, handles elements 0-255. Thread 5 computes `i = 0 × 256 + 5 = 5`, loads elements 5 and 133, adds them, and stores the sum in `sdata[5]`. Block 1 handles elements 256-511.
+
+The first level of the tree is now done during the load, in the thread's own registers. It needs no shared memory and no `__syncthreads()`.
+
+**Why `i + blockDim.x` and not `i + 1`?** This is about how global memory is read.
+
+Global memory is read in **chunks** of consecutive bytes (for example 128 bytes = 32 integers). When the 32 threads of a warp read 32 consecutive integers, the hardware fetches **one chunk** and gives each thread its number. This is called **coalescing**, and it is the fastest way to read global memory.
+
+- With `i` and `i + 128`: in the first read, threads 0-31 read elements 0-31 (one chunk). In the second read, they read elements 128-159 (one chunk). Every byte fetched is used.
+- If instead thread `t` read elements `2t` and `2t + 1`: in the first read, threads 0-31 read elements 0, 2, 4, ..., 62. These span two chunks, and half of each chunk (the odd elements) is fetched and not used in that read.
+
+So the slide keeps each read consecutive across the warp.
 
 ## Slide 19: Performance, Kernel 4
 
-**Says:** 0.965 ms, 17.377 GB/s, 1.78 times faster.
+**New row:** 0.965 ms, 17.377 GB/s, 1.78 times faster.
 
-**Means:** 20% of peak.
+17.377 ÷ 86.4 = **20%**.
 
 ## Slide 20: Instruction Bottleneck
 
-**Says:** at 17 GB/s we are far from the memory limit, and reduction does little math. So the limit is likely instruction overhead: address calculation and loop control. Strategy: unroll loops.
+**The speaker's reasoning, in full:**
 
-**Means:** for each useful `+`, the loop also computes `tid < s`, `tid + s`, the shift, the loop test, the branch, and `__syncthreads()`. Those extra instructions cost more than the add. Unrolling (writing out the loop steps one by one) removes the loop test and the branch, and lets the compiler compute addresses at compile time.
+1. At 17 GB/s, the memory is still idle 80% of the time. So memory is not the limit.
+2. The math is one addition per number. That is not the limit either.
+3. So what takes the time? The **other** instructions: the ones that are not loads, stores, or the useful additions.
 
-**Today:** this is the reasoning Nsight Compute automates. On Friday, "warp stall reasons" tells you whether warps wait on memory or on instructions.
+Look at what one step of the loop costs each thread:
+
+```cuda
+for (s = blockDim.x/2; s > 0; s >>= 1) {   // shift, compare, branch
+    if (tid < s)                           // compare, branch
+        sdata[tid] += sdata[tid + s];      // add for the address, 2 loads, 1 add, 1 store
+    __syncthreads();                       // wait for the whole block
+}
+```
+
+Only the `+=` is useful work. Everything else is overhead: computing `s`, testing the loop condition, jumping back, testing `tid < s`, computing the address `tid + s`, and waiting at `__syncthreads()`.
+
+**The fix: unroll the loop.** "Unrolling" means writing out each step of the loop as separate lines, so the loop counter, the loop test and the jump back disappear. Slides 21-28 do this.
 
 ## Slide 21: Unrolling the Last Warp
 
-**Says:** when `s <= 32`, only one warp is still working. Its 32 threads execute together, so `__syncthreads()` and `if (tid < s)` are not needed. Unroll the last 6 steps.
+**The observation:** when `s` gets to 32 or less, only threads 0-31 are still working. That is exactly one warp (warp 0).
 
-**Means:** this was true on G80: a warp's 32 threads always ran in lockstep.
+**On the G80, this allowed two shortcuts.** In 2007, the 32 threads of a warp always ran in exact lockstep: the same instruction at the same moment. So:
 
-**Today: this assumption is false since the Volta generation (2017, compute capability 7.0).** Volta added independent thread scheduling: threads in one warp can run out of step. Code that relies on implicit lockstep can read values before another thread has written them. See slide 22.
+1. **No `__syncthreads()` needed.** The threads of one warp are always at the same line, so there is nothing to wait for.
+2. **No `if (tid < s)` needed.** The warp runs the instruction anyway (Part 0: the cost is per warp). Letting threads with `tid >= s` also do the addition costs nothing. They write wrong values into positions `s` and above, but those positions are never read again.
 
-## Slide 22: Reduction #5: Unroll the Last Warp (code)
+So the last 6 steps (s = 32, 16, 8, 4, 2, 1) can be written out with no barrier and no test.
 
-**Says:** a `warpReduce` function does the last 6 adds (`+32, +16, +8, +4, +2, +1`) with no `__syncthreads()`. The pointer must be `volatile`. The main loop stops at `s > 32`. Note: this saves work in all warps, because without unrolling every warp runs the loop test and the `if` at every step.
+**Important: this is no longer true.** Since the Volta generation of GPUs (2017, which includes the H100), the threads of a warp can run out of step with each other. Code that relies on lockstep can read a value before another thread has written it, and give wrong answers. Slide 22 gives the safe modern version.
 
-**Means:** `volatile` tells the compiler to read and write shared memory on every line, instead of keeping values in registers. Without it, the compiler may keep `sdata[tid]` in a register and never see the other threads' writes.
-
-**Today: do not write this version.** On an H100, use one of these instead:
+## Slide 22: Reduction #5: Unroll the Last Warp (the code)
 
 ```cuda
-// Option A: shared memory, with warp barriers between the read and the write
-if (tid < 32) {
-    int v = sdata[tid];
-    for (int s = 32; s > 0; s >>= 1) {
-        v += sdata[tid + s];
-        __syncwarp();          // all reads of this step finish
-        sdata[tid] = v;
-        __syncwarp();          // all writes of this step finish
-    }
+__device__ void warpReduce(volatile int* sdata, int tid) {
+    sdata[tid] += sdata[tid + 32];
+    sdata[tid] += sdata[tid + 16];
+    sdata[tid] += sdata[tid + 8];
+    sdata[tid] += sdata[tid + 4];
+    sdata[tid] += sdata[tid + 2];
+    sdata[tid] += sdata[tid + 1];
 }
-
-// Option B (what modern code does): warp shuffle, no shared memory
-// Each thread holds its value in a register `v`.
-for (int offset = 16; offset > 0; offset >>= 1)
-    v += __shfl_down_sync(0xffffffff, v, offset);
-// lane 0 now holds the sum of the warp's 32 values
 ```
 
-`__shfl_down_sync` lets a thread read a register of another thread in the same warp directly, with no shared memory. `0xffffffff` says all 32 threads take part. Option A needs two barriers per step because, in one step, thread 0 reads `sdata[16]` while thread 16 writes it. Option B has no shared memory, so it has no such problem. Prefer B. NVIDIA's blog post [Using CUDA Warp-Level Primitives](https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/) explains both.
+These are the 6 last steps of the tree, written out, with no barrier and no `if`.
+
+**Why `volatile`?** Without it, the compiler sees six lines that all update `sdata[tid]` and may keep that value in a register, writing it to shared memory only at the end. Then the other threads never see the updated values, and the result is wrong. `volatile` forces every read and every write on every line to go to shared memory.
+
+The main loop now stops at `s > 32` and calls `warpReduce` for the rest:
+
+```cuda
+for (unsigned int s=blockDim.x/2; s>32; s>>=1) { ... }
+if (tid < 32) warpReduce(sdata, tid);
+```
+
+**The note at the bottom of the slide:** "This saves useless work in all warps, not just the last one." In version 4, all 4 warps ran the loop test and the `if` for every step, even when only warp 0 had work. Now warps 1-3 leave the loop after s = 64 and are done.
+
+**Do not write this version for an H100.** Use the safe modern version. Each thread keeps its value in a register `v` and reads other threads' registers directly:
+
+```cuda
+// v holds this thread's partial sum
+for (int offset = 16; offset > 0; offset >>= 1)
+    v += __shfl_down_sync(0xffffffff, v, offset);
+// thread 0 of the warp now holds the sum of all 32 values
+```
+
+`__shfl_down_sync(mask, v, offset)` gives each thread the value `v` of the thread `offset` positions higher in the same warp. With offset 16, thread 0 gets thread 16's value, thread 1 gets thread 17's, and so on. After offsets 16, 8, 4, 2, 1, thread 0 has added all 32 values. The `_sync` part includes the synchronization, so it is safe on current GPUs. `0xffffffff` means all 32 threads take part. It also uses no shared memory at all.
+
+More detail: NVIDIA's [Using CUDA Warp-Level Primitives](https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/).
 
 ## Slide 23: Performance, Kernel 5
 
-**Says:** 0.536 ms, 31.289 GB/s, 1.8 times faster.
+**New row:** 0.536 ms, 31.289 GB/s, 1.8 times faster.
 
-**Means:** 36% of peak.
+31.289 ÷ 86.4 = **36%**. Removing the loop overhead from the last 6 steps almost doubled the speed. This confirms the reasoning of slide 20: the instructions were the limit.
 
 ## Slide 24: Complete Unrolling
 
-**Says:** if the number of loop steps is known at compile time, the whole loop can be unrolled. Block size is at most 512 and a power of 2, so there are few cases. Use C++ templates to handle any block size.
+**The next step:** the steps before the last warp (s = 64 for a 128-thread block, more for bigger blocks) are still in a loop. Unroll them too.
 
-**Today:** the maximum block size is 1024, not 512.
+**The difficulty:** to write out the steps, the compiler must know how many steps there are, which depends on the block size. But the block size is chosen when the kernel starts, not when it is compiled.
+
+**Why this is solvable:** there are few possible block sizes. The block size is a power of 2 (the talk uses only powers of 2), and the G80 allows at most 512 threads. So there are only 10 possibilities: 1, 2, 4, ..., 512. (Today the limit is 1024.)
+
+**The tool:** C++ templates, which let you compile one copy of the kernel for each block size.
 
 ## Slide 25: Unrolling with Templates
 
-**Says:** make the block size a template parameter: `template <unsigned int blockSize> __global__ void reduce5(...)`.
+```cuda
+template <unsigned int blockSize>
+__global__ void reduce5(int *g_idata, int *g_odata)
+```
 
-**Means:** the compiler makes a separate kernel for each block size. Inside each one, `blockSize` is a constant.
+`blockSize` is now a **template parameter**. When you write `reduce5<128>`, the compiler makes a copy of the kernel in which `blockSize` is the constant 128. `reduce5<256>` makes another copy with 256. Inside each copy, the compiler knows the block size exactly.
 
-## Slide 26: Reduction #6: Completely Unrolled (code)
+## Slide 26: Reduction #6: Completely Unrolled (the code)
 
-**Says:** every step is written out, each guarded by `if (blockSize >= 512)`, `>= 256`, and so on. The text in red (the `blockSize` tests) is evaluated at compile time.
+```cuda
+if (blockSize >= 512) { if (tid < 256) { sdata[tid] += sdata[tid + 256]; } __syncthreads(); }
+if (blockSize >= 256) { if (tid < 128) { sdata[tid] += sdata[tid + 128]; } __syncthreads(); }
+if (blockSize >= 128) { if (tid < 64)  { sdata[tid] += sdata[tid + 64];  } __syncthreads(); }
+if (tid < 32) warpReduce<blockSize>(sdata, tid);
+```
 
-**Means:** because `blockSize` is a constant, the compiler deletes the tests that are false and keeps only the needed steps. No loop counter, no loop test, no branch. Only the adds, the `tid < N` tests, and the barriers remain.
+Each step of the tree is written out. The tests on `blockSize` (red on the slide) are tests on a constant, so the compiler decides them while compiling and removes them from the program.
 
-**Today:** the `warpReduce` part has the same Volta problem as slide 22. In modern code, `#pragma unroll` on a loop with a compile-time bound gives the same result as manual unrolling.
+**What the compiler keeps for `blockSize = 128`:**
+- `blockSize >= 512` is false: line removed.
+- `blockSize >= 256` is false: line removed.
+- `blockSize >= 128` is true: kept, without the test.
+- In `warpReduce`, all six lines are kept (each has a test like `blockSize >= 64`, all true).
+
+So the compiled kernel is:
+
+```cuda
+if (tid < 64) sdata[tid] += sdata[tid + 64];
+__syncthreads();
+if (tid < 32) { /* the six warpReduce lines */ }
+```
+
+No loop, no loop counter, no tests on `s`. Only the additions, the `tid` tests and one barrier.
+
+(The `warpReduce` part has the same 2017 problem as slide 22. On an H100, use the shuffle version.)
 
 ## Slide 27: Invoking Template Kernels
 
-**Says:** at runtime, a `switch` on the block size picks which compiled version to launch.
+**The question on the slide:** "Don't we still need block size at compile time?"
 
-**Means:** compile-time constants with a runtime choice. CUTLASS (Week 3) uses the same idea at a much larger scale: one compiled kernel per tile size, picked at runtime.
+**The answer:** compile all 10 versions, then pick one at run time with a `switch`:
+
+```cuda
+switch (threads) {
+    case 512: reduce5<512><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata); break;
+    case 256: reduce5<256><<<...>>>(...); break;
+    ...
+}
+```
+
+`threads` is the block size chosen at run time. The `switch` starts the copy that was compiled for that size. You get the speed of a compile-time constant with a choice made at run time.
 
 ## Slide 28: Performance, Kernel 6
 
-**Says:** 0.381 ms, 43.996 GB/s, 1.41 times faster.
+**New row:** 0.381 ms, 43.996 GB/s, 1.41 times faster.
 
-**Means:** 51% of peak.
+43.996 ÷ 86.4 = **51%**. Half of the memory's top speed.
 
 ## Slide 29: Parallel Reduction Complexity
 
-**Says:** log N steps. Total work N - 1 adds, the same as a sequential loop (work-efficient). With P processors, time is O(N/P + log N).
+This slide and the next two use some theory to explain the last improvement. The terms:
 
-**Means:** "work-efficient" means the parallel version does not do extra adds compared with a CPU loop. The N/P term is the time to process the data. The log N term is the tree. Inside one block, N = P (one thread per element), so the time is O(log N).
+**"Log(N) parallel steps, each step S does N/2^S independent ops."** With N numbers, step 1 does N/2 additions, step 2 does N/4, and so on, for log2(N) steps. With N = 8: 4, then 2, then 1, in 3 steps.
+
+**"Step complexity is O(log N)."** The number of steps grows with log N. Doubling the input adds only one step.
+
+**"Performs N-1 operations. Work complexity is O(N). It is work-efficient."** Total additions: 4 + 2 + 1 = 7 = N - 1 for N = 8. A CPU loop also does N - 1 additions. So the parallel version does no extra additions. That is what "work-efficient" means.
+
+**"With P threads physically in parallel, time complexity is O(N/P + log N)."** If the hardware can do P additions at the same time, the N additions take about N/P time, plus log N for the steps of the tree, which must happen one after another.
 
 ## Slide 30: What About Cost?
 
-**Says:** cost = processors × time. N threads × log N time = N log N, which is more than the N of a sequential loop. Brent's theorem: use N/log N threads, each summing log N values sequentially first. Cost becomes N. This is called algorithm cascading.
+**Cost** here means: number of threads × time. It measures how much of the GPU's capacity the algorithm uses, including threads that are waiting and doing nothing.
 
-**Means:** with one thread per element, most threads are idle for most of the tree (slide 17). If each thread first sums several values in a loop, fewer threads are needed and each one does more useful work before the tree starts.
+**With one thread per number** (versions 1-6):
+- N threads, for log N steps.
+- Cost = N × log N.
+- But only N - 1 additions are useful. The rest of the N log N thread-steps are idle threads (slide 17). So the algorithm is **not cost-efficient**: most of the capacity is wasted.
+
+**Brent's theorem suggests a fix:** use fewer threads, and give each one more work.
+- Use N / log N threads.
+- First, each thread adds log N numbers by itself, in a normal loop. This takes log N time, and no thread is idle.
+- Then the threads do the tree on their N / log N partial sums: about log N more steps.
+- Cost = (N / log N threads) × (log N time) = N. Cost-efficient.
+
+**Example** with N = 1,024: log N = 10. Use about 100 threads. Each thread first adds about 10 numbers by itself. Then a tree over the 100 partial sums.
+
+This is called **algorithm cascading**: a sequential part (each thread loops) followed by a parallel part (the tree).
 
 ## Slide 31: Algorithm Cascading
 
-**Says:** each thread loads and sums many elements, then the block does the tree. Brent says about log n elements per thread; in practice more is better: better latency hiding, fewer tree levels, fewer kernel launches with only a few blocks. On G80: 64-256 blocks of 128 threads, 1024-4096 elements per thread.
+**On this slide:** the practical advice.
 
-**Means:** this links to Monday's Little's law. A thread that loops over many elements keeps loads in flight continuously. Fewer blocks also means the second kernel launch (slide 5) has very little work.
+- Each thread loads and adds **many** numbers in a loop, then the block does the tree in shared memory.
+- Brent's theorem says each thread should add about log N numbers (for a block, that is 1024 or 2048 numbers per block instead of 256).
+- In practice, the speaker found that **even more** is better, for three reasons:
+  1. **Better latency hiding.** A thread in a loop starts its next memory read right after the last one, so many reads are always in progress. (This is the "bytes in flight" idea from Monday's notes: memory reaches full speed only when enough reads are in progress at once.)
+  2. **Fewer levels of kernel launches.** Fewer blocks means fewer partial sums, so the next launch (slide 5) has less to do, and fewer launches are needed.
+  3. **The last launches are slow.** A launch with only a few blocks uses only a few SMs and still pays the full cost of starting a kernel.
+- On the G80, the best result was 64-256 blocks of 128 threads, with each thread adding 1024-4096 numbers.
 
-**Today:** the H100 equivalent of "64-256 blocks" is a small multiple of 132 SMs. A common choice is a grid-stride loop with 2-4 blocks per SM.
+**Today:** the H100 equivalent of "64-256 blocks" is a small multiple of its 132 SMs.
 
-## Slide 32: Reduction #7: Multiple Adds per Thread
+## Slide 32: Reduction #7: Multiple Adds per Thread (the code)
 
-**Says:** replace the two-element load with a `while (i < n)` loop that adds two elements per iteration and moves `i` forward by `gridSize = blockSize * 2 * gridDim.x`.
+```cuda
+unsigned int tid = threadIdx.x;
+unsigned int i = blockIdx.x*(blockSize*2) + threadIdx.x;
+unsigned int gridSize = blockSize*2*gridDim.x;
+sdata[tid] = 0;
 
-**Means:** this is the grid-stride loop. The whole grid covers `gridSize` elements per iteration, then moves forward together. Each thread accumulates into `sdata[tid]`.
+while (i < n) {
+    sdata[tid] += g_idata[i] + g_idata[i+blockSize];
+    i += gridSize;
+}
+__syncthreads();
+```
+
+`gridDim.x` is the number of blocks. `n` is the length of the array (a new kernel argument).
+
+**Example:** 128 threads per block, 64 blocks. Then `gridSize = 128 × 2 × 64 = 16,384`.
+
+- Block 0, thread 0 starts at `i = 0`. It adds elements 0 and 128. Then `i` becomes 16,384, and it adds elements 16,384 and 16,512. Then 32,768 and 32,896. And so on until the end of the array.
+- Block 1, thread 0 starts at `i = 256`, and also jumps by 16,384 each time.
+
+In each pass of the loop, the 64 blocks together cover 16,384 consecutive elements (each block takes a 256-element piece). Then all of them move forward by 16,384 together. This is called a **grid-stride loop**.
+
+With 4 million elements, each thread goes through the loop 4,194,304 ÷ 16,384 = 256 times, so it adds 512 numbers before the tree starts.
 
 ## Slide 33: Reduction #7, the coalescing note
 
-**Says:** same code, with a note: the `gridSize` stride keeps the reads coalesced.
+**On this slide:** the same code, with a note: "gridSize loop stride to maintain coalescing!"
 
-**Means:** the obvious alternative is for each thread to sum a contiguous chunk (thread 0 sums elements 0-1023, thread 1 sums 1024-2047). Then the 32 threads of a warp read addresses 1024 elements apart, and no read can be combined. With the grid stride, in each iteration the threads of a warp read 32 neighbouring elements. Coalesced.
+**Why the jumping pattern?** The obvious alternative is to give each thread one **continuous piece** of the array: thread 0 adds elements 0-511, thread 1 adds elements 512-1023, and so on.
+
+Look at what the 32 threads of a warp read **at the same moment** in each case:
+
+| | Thread 0 | Thread 1 | Thread 2 | ... | Thread 31 |
+|---|---|---|---|---|---|
+| Grid-stride loop, first read | element 0 | element 1 | element 2 | ... | element 31 |
+| Continuous pieces, first read | element 0 | element 512 | element 1024 | ... | element 15,872 |
+
+With the grid-stride loop, the warp reads 32 consecutive elements: **one chunk** from memory (slide 18). With continuous pieces, the 32 reads are far apart: **32 separate chunks**, and most of each chunk is fetched and thrown away. The grid-stride loop keeps every read coalesced.
 
 ## Slide 34: Performance, Kernel 7
 
-**Says:** 0.268 ms, 62.671 GB/s, 1.42 times faster, 30.04 times faster than Kernel 1. On 32M elements: 73 GB/s.
+**New row:** 0.268 ms, 62.671 GB/s, 1.42 times faster. **30 times faster than Kernel 1.**
 
-**Means:** 62.671 ÷ 86.4 = 73% of peak at 4M elements; 73 ÷ 86.4 = 84% at 32M. Larger inputs do better because the fixed costs (kernel launches, the final tree) are a smaller share of the total time.
+62.671 ÷ 86.4 = **73%**.
 
-**Today:** this is the version that should reach the 70% target in the plan. Versions 1-3 alone will not.
+**"Kernel 7 on 32M elements: 73 GB/s!"** With 8 times more data, it reaches 73 ÷ 86.4 = **84%**. Larger inputs do better because the fixed costs (starting the kernels, the tree at the end of each block, the small later launches) are a smaller share of the total time.
 
 ## Slide 35: Final Optimized Kernel
 
-**Says:** the complete Kernel 7 on one page.
+**On this slide:** the complete Kernel 7. Read it top to bottom and match each part to the slide that introduced it:
 
-**Means:** read it top to bottom and name each part: grid-stride loop with two adds (slides 18, 32), unrolled tree with compile-time tests (slide 26), unrolled last warp (slide 22), write of the block sum. For an H100, replace `warpReduce` with the shuffle loop from slide 22.
+| Part of the code | What it does | Slide |
+|---|---|---|
+| `template <unsigned int blockSize>` | Block size as a compile-time constant | 25 |
+| `i = blockIdx.x*(blockSize*2) + tid` and the `while` loop with `gridSize` | Each thread adds many numbers, two per pass, with coalesced reads | 18, 32, 33 |
+| `sdata[tid] = 0` before the loop | Start each thread's sum at 0 | 32 |
+| The three `if (blockSize >= ...)` lines | The tree steps before the last warp, unrolled | 26 |
+| `if (tid < 32) warpReduce(sdata, tid)` | The last 6 steps, no barrier | 22 |
+| `if (tid == 0) g_odata[blockIdx.x] = sdata[0]` | Write the block's sum | 7 |
 
-## Slide 36: Performance Comparison (graph)
+For an H100: replace `warpReduce` with the `__shfl_down_sync` loop from slide 22.
 
-**Says:** log-log plot of time against number of elements, from 131,072 (2^17) to 33,554,432 (2^25), one line per kernel.
+## Slide 36: Performance Comparison (the graph)
 
-**Means:** each line rises from left to right because more elements take more time. On the right side, the lines are parallel and evenly spaced: each version is a fixed factor faster at large sizes. On the left side (small inputs), the lines flatten: time stops falling because fixed costs (launch time, the tree) dominate. Kernel 7 is lowest everywhere.
+**On this slide:** a graph. The horizontal axis is the number of elements, from 131,072 (2^17) to 33,554,432 (2^25). The vertical axis is the time in milliseconds. Both axes are logarithmic: each grid line is 10 times the one below it. There is one line for each kernel.
+
+**How to read it:**
+- Every line goes up to the right: more elements take more time.
+- The lines are stacked in order: Kernel 1 at the top (slowest), Kernel 7 at the bottom (fastest), at every input size.
+- On the right side, the lines are roughly parallel. On a logarithmic axis, that means each version is a fixed number of times faster than the one above it, for large inputs.
+- On the left side (small inputs), the lines flatten out. Below some size, the time no longer drops when the input gets smaller, because the fixed costs (starting kernels) dominate.
+- Some lines stop early on the right. Those kernels were only measured up to 4 million (or 8 million) elements. Kernel 7 is the only one measured up to 32 million.
 
 ## Slide 37: Types of Optimization
 
-**Says:** the algorithm changes (addressing, cascading) gave 11.84 times combined. The code changes (unrolling) gave 2.54 times combined.
+The speaker splits the 30 times speedup into two kinds:
 
-**Means:** fix the algorithm first: what each thread does and where it reads from. Unrolling helps, but only after that.
+**Algorithm changes** (which thread reads which address, and how much work each thread does): Kernel 1→2 (2.33x), 2→3 (2.01x), 3→4 (1.78x), 6→7 (1.42x). Multiplied together: **11.84x**.
+
+**Code changes** (unrolling): Kernel 4→5 (1.8x), 5→6 (1.41x). Multiplied together: **2.54x**.
+
+**The lesson:** most of the speed came from changing the algorithm, not from tuning the code. Fix the algorithm first. Unroll afterwards.
 
 ## Slide 38: Conclusion
 
-**Says:** understand coalescing, divergence, bank conflicts, latency hiding. Use peak numbers to guide the work. Know the complexity theory. Find the type of limit (memory, math, or instruction overhead). Fix the algorithm, then unroll. Use templates.
+Each item on the slide, with where you saw it in the talk:
 
-**Means:** this list is the checklist for every kernel in the plan.
+| Item | Where it appeared |
+|---|---|
+| Memory coalescing | Slides 18, 33: a warp should read consecutive addresses |
+| Divergent branching | Slides 9, 12: working threads should be packed into as few warps as possible |
+| Bank conflicts | Slides 12, 14: threads of a warp should use different shared-memory banks |
+| Latency hiding | Slide 31: keep many memory reads in progress at once |
+| Use peak performance to guide optimization | Slide 6, and every results table: compare with 86.4 GB/s |
+| Parallel algorithm complexity | Slides 29-30: step count, work, cost |
+| Identify the type of bottleneck | Slide 20: memory, math, or instruction overhead |
+| Optimize the algorithm, then unroll | Slide 37 |
+| Templates to generate optimal code | Slides 24-27 |
 
 ---
 
-## The 7 kernels in one table
+## Summary: the 7 kernels
 
-| # | Change | Problem it fixes | G80 GB/s | % of 86.4 |
-|---|---|---|---|---|
-| 1 | Interleaved, `tid % (2s)` | (start) | 2.08 | 2.4% |
-| 2 | Strided index | Divergence, slow `%` | 4.85 | 5.6% |
-| 3 | Sequential addressing | Bank conflicts | 9.74 | 11% |
-| 4 | Add during load | Half the threads idle | 17.38 | 20% |
-| 5 | Unroll last warp | Loop overhead (unsafe today; use shuffles) | 31.29 | 36% |
-| 6 | Full unroll with templates | Remaining loop overhead | 44.00 | 51% |
-| 7 | Many elements per thread | Too many threads, too little work each | 62.67 | 73% |
+| # | Change | Problem it fixes | Time (ms) | GB/s | % of 86.4 GB/s |
+|---|---|---|---|---|---|
+| 1 | Threads at multiples of 2s add (`tid % (2s)`) | (starting point) | 8.054 | 2.08 | 2.4% |
+| 2 | Packed thread numbers (`index = 2*s*tid`) | Divergence, slow `%` | 3.456 | 4.85 | 5.6% |
+| 3 | Stride from large to small (`tid < s`) | Bank conflicts | 1.722 | 9.74 | 11% |
+| 4 | Each thread loads two numbers and adds them | Half of the threads idle | 0.965 | 17.38 | 20% |
+| 5 | Last 6 steps written out | Loop overhead (unsafe on today's GPUs; use shuffles) | 0.536 | 31.29 | 36% |
+| 6 | All steps written out, using templates | The rest of the loop overhead | 0.381 | 44.00 | 51% |
+| 7 | Each thread adds many numbers (grid-stride loop) | Too many threads with too little work each | 0.268 | 62.67 | 73% |
 
-## What to expect on an H100
+## What this means for Tuesday
 
-The order of the versions should stay the same. The gaps between them will be different, because the H100 has much more bandwidth per SM, faster integer instructions, and better shared memory. I do not know the H100 numbers for each version; measuring them is Tuesday's task. Write your prediction for each version before you run it.
+You build versions 1-3 on an H100. Before you run each one, write down your guess for its GB/s as a percentage of 3,350 GB/s.
+
+The order of the versions should be the same as on the G80. The size of the gaps will be different, because the H100 is very different hardware. I do not know the H100 numbers; finding them is the point of the exercise. On the G80, version 3 reached only 11% of top speed, so expect versions 1-3 to be far from the limit. Versions 4-7 close most of the gap.
