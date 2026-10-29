@@ -26,6 +26,18 @@
     },
     {
       "status": "todo",
+      "id": "s5",
+      "title": "Tue: Harris reduction slides, versions 1-3 on the H100",
+      "why": "Comes after Monday because the goal is a percent of the 3.35 TB/s peak, and before Wednesday because online softmax is parallelized with this same tree.",
+      "kind": "teach",
+      "gaps": [
+        "Why the cost of a tree step is counted in warps with work, not threads with work, is not yet worked through.",
+        "Bank conflicts in shared memory and coalescing in global memory are not yet told apart.",
+        "Why the 2007 warp-synchronous trick is unsafe on an H100, and what the shuffle version in reduce.py does instead, is not yet connected."
+      ]
+    },
+    {
+      "status": "todo",
       "id": "s2",
       "title": "Wed: online softmax, derive the rescale step",
       "why": "Comes after Tuesday reduction because the parallel version of online softmax is a tree reduction over (max, sum) pairs.",
