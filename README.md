@@ -6,7 +6,7 @@ The plan is ordered by kernel family: memory-bound kernels, then GEMM, then atte
 
 **Rule for every kernel:** before you open the file, write down what it computes, how work splits across blocks and warps, where each tensor lives (global, shared, registers), and whether it is memory-bound or compute-bound. Then read the code and mark where you were wrong.
 
-GPU work runs on Modal H100. GPU MODE problems run on GPU MODE's machines through [popcorn-cli](https://github.com/gpu-mode/popcorn-cli).
+GPU work runs on Modal: a T4 by default (cheapest; `GPU=L4` or `GPU=H100` to switch). Use the H100 only for Hopper work in Week 3 and for Week 4 benchmarks. GPU MODE problems run on GPU MODE's machines through [popcorn-cli](https://github.com/gpu-mode/popcorn-cli).
 
 ---
 

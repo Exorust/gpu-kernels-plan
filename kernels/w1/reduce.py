@@ -1,15 +1,18 @@
-"""The 7 reduction kernels from Mark Harris's slides, runnable on a Modal H100.
+"""The 7 reduction kernels from Mark Harris's slides, runnable on a Modal GPU.
 
-Run:  modal run kernels/w1/reduce.py
+Run:  modal run kernels/w1/reduce.py          (T4, the cheapest)
+      GPU=L4 modal run kernels/w1/reduce.py
 
 Kernel N here = "Kernel N" / "Reduction #N" in the slides (slide numbers in comments).
-Changes from the slides, so the code is correct on an H100:
+Changes from the slides, so the code is correct on current GPUs:
   - float instead of int.
   - Kernels 5-7 do the last warp with __shfl_down_sync, not the volatile
     warp-synchronous trick (unsafe since Volta, see companion slide 22).
 Each kernel does one pass: n numbers -> one partial sum per block. The script
 adds the partial sums on the host to check the answer, and times the pass.
 """
+import os
+
 import modal
 
 app = modal.App("reduce")
@@ -19,7 +22,6 @@ image = modal.Image.from_registry(
 
 BLOCK = 128          # threads per block, as in the slides
 N = 1 << 26          # 67M floats = 268 MB
-K7_BLOCKS = 132 * 4  # kernel 7 grid: 4 blocks per H100 SM (slide 31)
 
 SRC = r"""
 // Kernel 1, slides 7-9: interleaved addressing, divergent branch.
@@ -153,22 +155,26 @@ KERNELS = [
     ("reduce4", N // (2 * BLOCK)),
     ("reduce5", N // (2 * BLOCK)),
     (f"reduce6<{BLOCK}>", N // (2 * BLOCK)),
-    (f"reduce7<{BLOCK}>", K7_BLOCKS),
+    (f"reduce7<{BLOCK}>", None),  # 4 blocks per SM, set at run time (slide 31)
 ]
 
 
-@app.function(gpu="H100", image=image)
+@app.function(gpu=os.environ.get("GPU", "T4"), image=image)
 def run():
     import cupy as cp
 
     x = cp.random.rand(N, dtype=cp.float32)
     want = float(x.sum(dtype=cp.float64))
     out = cp.zeros(N // BLOCK, dtype=cp.float32)
+    p = cp.cuda.runtime.getDeviceProperties(0)
+    # 2 transfers per clock (DDR) x clock (kHz) x bus width in bytes
+    peak = 2 * p["memoryClockRate"] * 1e3 * (p["memoryBusWidth"] // 8) / 1e9
     mod = cp.RawModule(code=SRC, name_expressions=[k for k, _ in KERNELS if "<" in k])
 
-    print(f"{N} floats ({N * 4 / 1e6:.0f} MB), {BLOCK} threads per block, H100 peak 3350 GB/s")
+    print(f"{p['name'].decode()}, peak {peak:.0f} GB/s; {N} floats ({N * 4 / 1e6:.0f} MB), {BLOCK} threads per block")
     print(f"{'kernel':<14}{'blocks':>9}{'ms':>9}{'GB/s':>8}{'% peak':>8}")
     for name, blocks in KERNELS:
+        blocks = blocks or p["multiProcessorCount"] * 4
         k = mod.get_function(name)
         args = (x, out, cp.uint32(N)) if name.startswith("reduce7") else (x, out)
         launch = lambda: k((blocks,), (BLOCK,), args, shared_mem=BLOCK * 4)
@@ -183,4 +189,4 @@ def run():
         t1.synchronize()
         ms = cp.cuda.get_elapsed_time(t0, t1) / 20
         gbs = N * 4 / ms / 1e6
-        print(f"{name:<14}{blocks:>9}{ms:>9.3f}{gbs:>8.0f}{gbs / 3350:>8.0%}")
+        print(f"{name:<14}{blocks:>9}{ms:>9.3f}{gbs:>8.0f}{gbs / peak:>8.0%}")

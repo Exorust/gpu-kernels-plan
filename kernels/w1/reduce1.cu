@@ -51,8 +51,14 @@ int main() {
     double sum = 0;
     for (float p : h_out) sum += p;   // add the partial sums on the CPU
 
+    // Peak bandwidth of this GPU: 2 transfers per clock (DDR) x clock x bus width in bytes.
+    cudaDeviceProp p;
+    cudaGetDeviceProperties(&p, 0);
+    double peak = 2.0 * p.memoryClockRate * 1e3 * (p.memoryBusWidth / 8) / 1e9;
+
     double gbs = (double)N * sizeof(float) / ms / 1e6;
+    printf("%s, peak %.0f GB/s\n", p.name, peak);
     printf("sum %.0f, want %d: %s\n", sum, N, sum == N ? "OK" : "WRONG");
-    printf("%.3f ms  %.0f GB/s  %.1f%% of 3350 GB/s\n", ms, gbs, gbs / 3350 * 100);
+    printf("%.3f ms  %.0f GB/s  %.1f%% of peak\n", ms, gbs, gbs / peak * 100);
     return 0;
 }
